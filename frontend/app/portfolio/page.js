@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import AppShell from "../../components/AppShell";
 import { KpiCard } from "../../components/ui";
 import { subscribeQuotes, subscribeTradingOrders, subscribeTradingPositions, subscribeTradingState } from "../../lib/firestore";
+import { fetchPortfolio } from "../../lib/backend";
 
 function InfoTip({ text }) {
   const [open, setOpen] = useState(false);
@@ -42,6 +43,8 @@ export default function PortfolioPage() {
   const [positions, setPositions] = useState([]);
   const [orders, setOrders] = useState([]);
   const [quotesMap, setQuotesMap] = useState({});
+  const [liveData, setLiveData] = useState(null);
+  const [liveLoading, setLiveLoading] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -52,6 +55,16 @@ export default function PortfolioPage() {
         return;
       }
       setLoading(false);
+      // Fetch live data from backend (real Binance balances when TESTNET/LIVE)
+      setLiveLoading(true);
+      try {
+        const data = await fetchPortfolio();
+        setLiveData(data);
+      } catch (e) {
+        console.warn("fetchPortfolio failed:", e.message);
+      } finally {
+        setLiveLoading(false);
+      }
     });
     return () => unsub();
   }, [router]);
@@ -88,13 +101,15 @@ export default function PortfolioPage() {
     });
   }, []);
 
-  const cashUSDT = Number(state?.cashUSDT || 0);
-  const equityUSDT = Number(state?.equityUSDT || 0);
-  const exposureUSDT = Number(state?.exposureUSDT || 0);
+  // Prefer live backend data; fall back to Firestore state
+  const cashUSDT = Number(liveData?.cashUSDT ?? state?.cashUSDT ?? 0);
+  const equityUSDT = Number(liveData?.equityUSDT ?? state?.equityUSDT ?? 0);
+  const exposureUSDT = Number(liveData?.exposureUSDT ?? state?.exposureUSDT ?? 0);
   const exposurePct = equityUSDT > 0 ? (exposureUSDT / equityUSDT) * 100 : 0;
   const cashPct = equityUSDT > 0 ? (cashUSDT / equityUSDT) * 100 : 0;
-  const currentMode = String(state?.mode || "PAPER").toUpperCase();
+  const currentMode = String(liveData?.mode ?? state?.mode ?? "PAPER").toUpperCase();
   const isSimulated = currentMode === "PAPER";
+  const binanceBalances = liveData?.binanceBalances || [];
 
   const aiContextGlobal = [
     "As decisões de entrada/saída consideram score, regime e sinal do motor determinístico.",
@@ -118,6 +133,43 @@ export default function PortfolioPage() {
         <KpiCard label="Exposição" value={`${exposurePct.toFixed(1)}%`} color={exposurePct > 80 ? "var(--danger)" : exposurePct > 50 ? "var(--warn)" : "var(--good)"} hint="Alocado em posições" />
         <KpiCard label="Cash %" value={`${cashPct.toFixed(1)}%`} color={cashPct < 20 ? "var(--danger)" : "var(--good)"} hint="Reserva de liquidez" />
       </div>
+
+      {!isSimulated && (
+        <div className="card" style={{ marginTop: 12 }}>
+          <div className="card-title">
+            <strong>Carteira {currentMode}</strong>
+            <span className="chip">Saldos reais na Binance</span>
+            {liveLoading && <span className="chip badge wait" style={{ marginLeft: 8 }}>Carregando…</span>}
+          </div>
+          {!liveLoading && binanceBalances.length === 0 && (
+            <p className="settings-help" style={{ marginTop: 8 }}>Nenhum saldo encontrado na conta Binance {currentMode}.</p>
+          )}
+          {binanceBalances.length > 0 && (
+            <div className="table-wrap" style={{ marginTop: 8 }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Ativo</th>
+                    <th>Disponível</th>
+                    <th>Bloqueado</th>
+                    <th>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {binanceBalances.map((b) => (
+                    <tr key={b.asset}>
+                      <td className="asset">{b.asset}</td>
+                      <td>{Number(b.free).toFixed(8)}</td>
+                      <td>{Number(b.locked).toFixed(8)}</td>
+                      <td>{(Number(b.free) + Number(b.locked)).toFixed(8)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="card" style={{ marginTop: 12 }}>
         <div className="card-title"><strong>Contexto IA da decisão</strong><span className="chip">Explicação operacional</span></div>

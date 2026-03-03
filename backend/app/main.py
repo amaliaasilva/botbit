@@ -175,6 +175,7 @@ def portfolio(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
 
     mode = str(config.get("mode") or "PAPER").upper()
     cash_usdt = float(state.get("cashUSDT") or config.get("paperInitialCashUSDT") or 0)
+    binance_balances: list[dict] = []
     if mode in {"TESTNET", "LIVE"}:
         api_key = get_secret("BINANCE_TESTNET_API_KEY") if mode == "TESTNET" else get_secret("BINANCE_API_KEY")
         api_secret = get_secret("BINANCE_TESTNET_API_SECRET") if mode == "TESTNET" else get_secret("BINANCE_API_SECRET")
@@ -182,9 +183,19 @@ def portfolio(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
             try:
                 client = BinanceTradeClient(api_key=api_key, api_secret=api_secret, mode=mode)
                 account = client.get_account()
-                balances = account.get("balances") or []
-                usdt = next((item for item in balances if str(item.get("asset") or "") == "USDT"), {})
+                raw_balances = account.get("balances") or []
+                usdt = next((item for item in raw_balances if str(item.get("asset") or "") == "USDT"), {})
                 cash_usdt = float(usdt.get("free") or cash_usdt)
+                # Keep non-zero balances for display
+                binance_balances = [
+                    {
+                        "asset": str(b.get("asset") or ""),
+                        "free": float(b.get("free") or 0),
+                        "locked": float(b.get("locked") or 0),
+                    }
+                    for b in raw_balances
+                    if float(b.get("free") or 0) > 0 or float(b.get("locked") or 0) > 0
+                ]
             except Exception:
                 pass
 
@@ -208,6 +219,7 @@ def portfolio(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
         "cashPct": round((cash_usdt / max(equity, 1e-9)) * 100.0, 3),
         "exposurePct": round((exposure / max(equity, 1e-9)) * 100.0, 3),
         "pnlUnrealizedUSDT": round(pnl_unrealized, 6),
+        "binanceBalances": binance_balances,
         "positions": positions,
         "openOrders": [row for row in orders if str(row.get("status") or "").upper() in {"NEW", "OPEN", "PARTIALLY_FILLED"}],
         "lastRun": {
