@@ -112,14 +112,16 @@ export default function PortfolioPage() {
     });
   }, []);
 
-  // Prefer live backend data; fall back to Firestore state
-  const cashUSDT = Number(liveData?.cashUSDT ?? state?.cashUSDT ?? 0);
-  const equityUSDT = Number(liveData?.equityUSDT ?? state?.equityUSDT ?? 0);
+  // KPIs do LIVE: saldo real da Binance
+  const liveCashUSDT = Number(balanceLive?.usdtFree ?? 0);
+  const liveTotalAssets = balanceLive?.totalAssets ?? 0;
+  // KPIs do TESTNET: saldo da conta testnet
+  const testnetCashUSDT = Number(balanceTestnet?.usdtFree ?? 0);
+  // KPIs do bot (posições abertas / exposição)
   const exposureUSDT = Number(liveData?.exposureUSDT ?? state?.exposureUSDT ?? 0);
-  const exposurePct = equityUSDT > 0 ? (exposureUSDT / equityUSDT) * 100 : 0;
-  const cashPct = equityUSDT > 0 ? (cashUSDT / equityUSDT) * 100 : 0;
+  const exposurePct = liveCashUSDT + exposureUSDT > 0 ? (exposureUSDT / (liveCashUSDT + exposureUSDT)) * 100 : 0;
+  const cashPct = 100 - exposurePct;
   const currentMode = String(liveData?.mode ?? state?.mode ?? "PAPER").toUpperCase();
-  const isSimulated = currentMode === "PAPER";
 
   const aiContextGlobal = [
     "As decisões de entrada/saída consideram score, regime e sinal do motor determinístico.",
@@ -129,19 +131,32 @@ export default function PortfolioPage() {
 
   return (
     <AppShell title="Portfolio" subtitle="Visão clara de caixa, exposição e posições">
+
+      {/* KPIs LIVE */}
       <div className="card" style={{ marginBottom: 12 }}>
-        <div className="card-title"><strong>Fonte do saldo</strong><span className={`chip ${isSimulated ? "badge wait" : "badge buy"}`}>{currentMode}</span></div>
-        <p className="settings-help" style={{ marginTop: 8 }}>
-          {isSimulated
-            ? "Você está em PAPER: os valores são simulados (ex.: caixa inicial e PnL virtual), não são o saldo real da Binance."
-            : "Modo conectado à exchange: o saldo tenta refletir conta Binance (USDT) para o modo ativo."}
-        </p>
+        <div className="card-title">
+          <strong>Conta LIVE</strong>
+          <span className="chip badge buy">Binance Real</span>
+          {liveLoading && <span className="chip badge wait" style={{ marginLeft: 8 }}>Carregando…</span>}
+        </div>
       </div>
       <div className="kpi-grid">
-        <KpiCard label="Cash (USDT)" value={cashUSDT.toFixed(2)} hint="Saldo livre para novas entradas" />
-        <KpiCard label="Equity (USDT)" value={equityUSDT.toFixed(2)} hint="Patrimônio total estimado" />
-        <KpiCard label="Exposição" value={`${exposurePct.toFixed(1)}%`} color={exposurePct > 80 ? "var(--danger)" : exposurePct > 50 ? "var(--warn)" : "var(--good)"} hint="Alocado em posições" />
-        <KpiCard label="Cash %" value={`${cashPct.toFixed(1)}%`} color={cashPct < 20 ? "var(--danger)" : "var(--good)"} hint="Reserva de liquidez" />
+        <KpiCard label="USDT livre (LIVE)" value={liveCashUSDT.toFixed(2)} hint="Saldo USDT disponível na Binance real" />
+        <KpiCard label="Ativos (LIVE)" value={liveTotalAssets} hint="Quantidade de ativos com saldo != 0 na conta real" />
+        <KpiCard label="Bot modo" value={currentMode} hint="Modo atual do motor de trading (TESTNET = executa na Binance Testnet)" />
+        <KpiCard label="Exposição bot" value={`${exposurePct.toFixed(1)}%`} color={exposurePct > 80 ? "var(--danger)" : exposurePct > 50 ? "var(--warn)" : "var(--good)"} hint="Percentual alocado em posições abertas pelo bot" />
+      </div>
+
+      {/* KPIs TESTNET */}
+      <div className="card" style={{ marginTop: 12, marginBottom: 12 }}>
+        <div className="card-title">
+          <strong>Conta TESTNET</strong>
+          <span className="chip badge wait">Binance Testnet</span>
+        </div>
+      </div>
+      <div className="kpi-grid">
+        <KpiCard label="USDT livre (TESTNET)" value={testnetCashUSDT.toFixed(2)} hint="Saldo USDT na conta Binance Testnet" />
+        <KpiCard label="canTrade" value={balanceTestnet?.canTrade ? "Sim ✓" : (liveLoading ? "…" : "Não ✗")} color={balanceTestnet?.canTrade ? "var(--good)" : undefined} hint="Conta testnet habilitada para operar" />
       </div>
 
       {balanceError && (
