@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import requests
 
 from app.auth import AuthContext, require_auth
@@ -18,6 +19,20 @@ from app.storage.firestore_client import FirestoreNotificationStorage
 from app.trading import run_trade_pipeline
 
 app = FastAPI(title="Market AI Scoring", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://botbit.web.app",
+        "https://botbit-489114.web.app",
+        "http://localhost:3000",
+        "http://localhost:3001",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 logger = get_logger(__name__)
 
 
@@ -227,6 +242,58 @@ def portfolio(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
             "lastSummary": state.get("lastSummary", ""),
             "lastError": state.get("lastError", ""),
         },
+    }
+
+
+@app.get("/portfolio/balance")
+def portfolio_balance(
+    account: str = "live",  # "live" | "testnet"
+    auth_ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    """Lê saldo real da Binance (LIVE ou TESTNET) independente do modo de trading."""
+    account = account.lower()
+    if account not in {"live", "testnet"}:
+        raise HTTPException(status_code=400, detail="account must be 'live' or 'testnet'")
+
+    if account == "testnet":
+        api_key = get_secret("BINANCE_TESTNET_API_KEY")
+        api_secret = get_secret("BINANCE_TESTNET_API_SECRET")
+        mode = "TESTNET"
+    else:
+        api_key = get_secret("BINANCE_API_KEY")
+        api_secret = get_secret("BINANCE_API_SECRET")
+        mode = "LIVE"
+
+    if not api_key or not api_secret:
+        raise HTTPException(status_code=503, detail=f"BINANCE_{mode.upper()}_API_KEY não configurada")
+
+    try:
+        client = BinanceTradeClient(api_key=api_key, api_secret=api_secret, mode=mode)
+        acct = client.get_account()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Binance error: {str(exc)}")
+
+    raw_balances = acct.get("balances") or []
+    non_zero = [
+        {
+            "asset": str(b.get("asset") or ""),
+            "free": float(b.get("free") or 0),
+            "locked": float(b.get("locked") or 0),
+            "total": float(b.get("free") or 0) + float(b.get("locked") or 0),
+        }
+        for b in raw_balances
+        if float(b.get("free") or 0) > 0 or float(b.get("locked") or 0) > 0
+    ]
+    non_zero.sort(key=lambda x: x["total"], reverse=True)
+
+    usdt = next((b for b in non_zero if b["asset"] == "USDT"), {"free": 0, "locked": 0, "total": 0})
+    return {
+        "account": mode,
+        "canTrade": bool(acct.get("canTrade", False)),
+        "balances": non_zero,
+        "usdtFree": usdt["free"],
+        "usdtLocked": usdt["locked"],
+        "totalAssets": len(non_zero),
     }
 
 
@@ -456,6 +523,33 @@ def cron_quotes() -> dict[str, Any]:
     return result
 
 
+@app.get("/api/live-quotes")
+def api_live_quotes(symbols: str = "") -> dict[str, Any]:
+    """Fetch live ticker data from Binance for arbitrary symbols.
+    Usage: /api/live-quotes?symbols=DOTUSDT,ADAUSDT
+    """
+    raw = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not raw:
+        return {"items": []}
+    raw = raw[:20]  # limit
+    binance = BinanceClient()
+    items: list[dict[str, Any]] = []
+    for sym in raw:
+        try:
+            ticker = binance.fetch_ticker_24h(sym)
+            if ticker:
+                items.append({
+                    "symbol": sym,
+                    "price": float(ticker.get("lastPrice") or 0),
+                    "change24hPct": float(ticker.get("priceChangePercent") or 0),
+                    "volume24h": float(ticker.get("quoteVolume") or 0),
+                    "source": "binance_live",
+                })
+        except Exception:
+            pass
+    return {"items": items}
+
+
 @app.get("/internal/executor/status")
 def internal_executor_status(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
     """Status do executor externo TESTNET (heartbeat + intents pendentes)."""
@@ -497,3 +591,108 @@ def cron_run() -> dict[str, Any]:
     result = run_score_pipeline()
     log_event(logger, "cron_run_finished", started_at=started_at, **result)
     return result
+
+
+@app.get("/api/explain/{symbol}")
+def api_explain(symbol: str) -> dict[str, Any]:
+    """Generate a 3-level AI explanation for an asset using Gemini.
+    Falls back to deterministic explanation if Gemini is unavailable.
+    """
+    from app.explain.explainer import gemini_explain
+
+    symbol = symbol.strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    settings = get_settings()
+    fs = _firestore()
+
+    # Gather facts from Firestore
+    facts: dict[str, Any] = {}
+    if fs:
+        # Market score data
+        market_ref = fs.client.collection("public").document("market_top").collection("items").document(symbol)
+        market_snap = market_ref.get()
+        if market_snap.exists:
+            md = market_snap.to_dict() or {}
+            facts.update({
+                "score": md.get("score"),
+                "signal": md.get("signal"),
+                "regime": md.get("regime"),
+                "rsi14": md.get("rsi14"),
+                "atr14": md.get("atr14"),
+                "ema50": md.get("ema50"),
+                "ema200": md.get("ema200"),
+            })
+
+        # Discover data
+        disc_ref = fs.client.collection("public").document("discover_top").collection("items").document(symbol)
+        disc_snap = disc_ref.get()
+        if disc_snap.exists:
+            dd = disc_snap.to_dict() or {}
+            facts["potentialScore"] = dd.get("potentialScore")
+            km = dd.get("keyMetrics") or {}
+            facts["volume_z"] = km.get("volume_z")
+            facts["corr_btc"] = km.get("corr_btc")
+            facts["trend_strength"] = km.get("trend_strength")
+
+        # Quote data
+        quote_ref = fs.client.collection("public").document("quotes_top").collection("items").document(symbol)
+        quote_snap = quote_ref.get()
+        if quote_snap.exists:
+            qd = quote_snap.to_dict() or {}
+            facts["price"] = qd.get("price")
+            facts["change24hPct"] = qd.get("change24hPct")
+            facts["volume24h"] = qd.get("volume24h")
+
+    # If no price from Firestore, try live Binance
+    if not facts.get("price"):
+        try:
+            binance = BinanceClient()
+            ticker = binance.fetch_ticker_24h(symbol)
+            if ticker:
+                facts["price"] = float(ticker.get("lastPrice") or 0)
+                facts["change24hPct"] = float(ticker.get("priceChangePercent") or 0)
+                facts["volume24h"] = float(ticker.get("quoteVolume") or 0)
+        except Exception:
+            pass
+
+    # Remove None values
+    facts = {k: v for k, v in facts.items() if v is not None}
+
+    # Try Gemini via Vertex AI (service account auth)
+    gemini_result = gemini_explain(symbol, facts, settings.gcp_project_id)
+
+    if gemini_result and gemini_result.get("leigo"):
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "source": "gemini",
+            "model": gemini_result.get("model", "gemini-2.0-flash"),
+            "facts": facts,
+            **gemini_result,
+        }
+
+    # Fallback to deterministic
+    from app.explain.explainer import build_explanation
+    fallback = build_explanation("EXPLAIN", symbol, facts)
+    score = int(float(facts.get("score") or 0))
+    signal = str(facts.get("signal") or "WAIT")
+    regime = str(facts.get("regime") or "Neutro")
+
+    return {
+        "ok": True,
+        "symbol": symbol,
+        "source": "deterministic",
+        "facts": facts,
+        "leigo": [
+            fallback.get("decisionOneLiner", ""),
+            *[r["plain"] for r in fallback.get("reasons", [])],
+        ],
+        "intermediario": fallback["levels"].get("INTERMEDIARIO", ""),
+        "tecnico": str(fallback["levels"].get("TECNICO", "")),
+        "significado": f"Score {score}/100, sinal {signal}, regime {regime}.",
+        "riscoPrincipal": fallback.get("riskNote", ""),
+        "condicaoMudar": "Score subir acima de 70 com regime favorável.",
+        "miniLicao": fallback.get("miniLesson", {}),
+    }

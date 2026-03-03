@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 import AppShell from "../../components/AppShell";
 import { KpiCard } from "../../components/ui";
 import { subscribeQuotes, subscribeTradingOrders, subscribeTradingPositions, subscribeTradingState } from "../../lib/firestore";
-import { fetchPortfolio } from "../../lib/backend";
+import { fetchPortfolio, fetchBalance } from "../../lib/backend";
 
 function InfoTip({ text }) {
   const [open, setOpen] = useState(false);
@@ -45,6 +45,9 @@ export default function PortfolioPage() {
   const [quotesMap, setQuotesMap] = useState({});
   const [liveData, setLiveData] = useState(null);
   const [liveLoading, setLiveLoading] = useState(false);
+  const [balanceLive, setBalanceLive] = useState(null);
+  const [balanceTestnet, setBalanceTestnet] = useState(null);
+  const [balanceError, setBalanceError] = useState("");
   const router = useRouter();
 
   useEffect(() => {
@@ -55,16 +58,24 @@ export default function PortfolioPage() {
         return;
       }
       setLoading(false);
-      // Fetch live data from backend (real Binance balances when TESTNET/LIVE)
+      // Fetch bot portfolio + real Binance balances (live + testnet) in parallel
       setLiveLoading(true);
-      try {
-        const data = await fetchPortfolio();
-        setLiveData(data);
-      } catch (e) {
-        console.warn("fetchPortfolio failed:", e.message);
-      } finally {
-        setLiveLoading(false);
+      setBalanceError("");
+      const [portfolioRes, liveRes, testnetRes] = await Promise.allSettled([
+        fetchPortfolio(),
+        fetchBalance("live"),
+        fetchBalance("testnet"),
+      ]);
+      if (portfolioRes.status === "fulfilled") setLiveData(portfolioRes.value);
+      else console.warn("fetchPortfolio failed:", portfolioRes.reason?.message);
+      if (liveRes.status === "fulfilled") setBalanceLive(liveRes.value);
+      else console.warn("fetchBalance(live) failed:", liveRes.reason?.message);
+      if (testnetRes.status === "fulfilled") setBalanceTestnet(testnetRes.value);
+      else console.warn("fetchBalance(testnet) failed:", testnetRes.reason?.message);
+      if (liveRes.status === "rejected" && testnetRes.status === "rejected") {
+        setBalanceError("Não foi possível carregar saldos da Binance.");
       }
+      setLiveLoading(false);
     });
     return () => unsub();
   }, [router]);
@@ -109,7 +120,6 @@ export default function PortfolioPage() {
   const cashPct = equityUSDT > 0 ? (cashUSDT / equityUSDT) * 100 : 0;
   const currentMode = String(liveData?.mode ?? state?.mode ?? "PAPER").toUpperCase();
   const isSimulated = currentMode === "PAPER";
-  const binanceBalances = liveData?.binanceBalances || [];
 
   const aiContextGlobal = [
     "As decisões de entrada/saída consideram score, regime e sinal do motor determinístico.",
@@ -134,42 +144,85 @@ export default function PortfolioPage() {
         <KpiCard label="Cash %" value={`${cashPct.toFixed(1)}%`} color={cashPct < 20 ? "var(--danger)" : "var(--good)"} hint="Reserva de liquidez" />
       </div>
 
-      {!isSimulated && (
+      {balanceError && (
         <div className="card" style={{ marginTop: 12 }}>
-          <div className="card-title">
-            <strong>Carteira {currentMode}</strong>
-            <span className="chip">Saldos reais na Binance</span>
-            {liveLoading && <span className="chip badge wait" style={{ marginLeft: 8 }}>Carregando…</span>}
-          </div>
-          {!liveLoading && binanceBalances.length === 0 && (
-            <p className="settings-help" style={{ marginTop: 8 }}>Nenhum saldo encontrado na conta Binance {currentMode}.</p>
-          )}
-          {binanceBalances.length > 0 && (
-            <div className="table-wrap" style={{ marginTop: 8 }}>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Ativo</th>
-                    <th>Disponível</th>
-                    <th>Bloqueado</th>
-                    <th>Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {binanceBalances.map((b) => (
-                    <tr key={b.asset}>
-                      <td className="asset">{b.asset}</td>
-                      <td>{Number(b.free).toFixed(8)}</td>
-                      <td>{Number(b.locked).toFixed(8)}</td>
-                      <td>{(Number(b.free) + Number(b.locked)).toFixed(8)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <p className="settings-help" style={{ color: "var(--danger)" }}>{balanceError}</p>
         </div>
       )}
+
+      {/* Carteira LIVE */}
+      <div className="card" style={{ marginTop: 12 }}>
+        <div className="card-title">
+          <strong>Carteira LIVE</strong>
+          <span className="chip badge buy">Binance Real</span>
+          {liveLoading && <span className="chip badge wait" style={{ marginLeft: 8 }}>Carregando…</span>}
+        </div>
+        {!liveLoading && !balanceLive && <p className="settings-help" style={{ marginTop: 8 }}>BINANCE_API_KEY não configurada ou erro de conexão.</p>}
+        {balanceLive && (
+          <>
+            <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
+              <span className="chip">USDT livre: <strong>{Number(balanceLive.usdtFree).toFixed(2)}</strong></span>
+              <span className="chip">USDT bloqueado: <strong>{Number(balanceLive.usdtLocked).toFixed(2)}</strong></span>
+              <span className="chip">Ativos: <strong>{balanceLive.totalAssets}</strong></span>
+              <span className={`chip ${balanceLive.canTrade ? "badge buy" : "badge sell"}`}>{balanceLive.canTrade ? "canTrade ✓" : "canTrade ✗"}</span>
+            </div>
+            {balanceLive.balances?.length > 0 && (
+              <div className="table-wrap" style={{ marginTop: 8 }}>
+                <table className="table">
+                  <thead><tr><th>Ativo</th><th>Disponível</th><th>Bloqueado</th><th>Total</th></tr></thead>
+                  <tbody>
+                    {balanceLive.balances.map((b) => (
+                      <tr key={b.asset}>
+                        <td className="asset">{b.asset}</td>
+                        <td>{Number(b.free).toFixed(8)}</td>
+                        <td>{Number(b.locked).toFixed(8)}</td>
+                        <td>{Number(b.total).toFixed(8)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Carteira TESTNET */}
+      <div className="card" style={{ marginTop: 12 }}>
+        <div className="card-title">
+          <strong>Carteira TESTNET</strong>
+          <span className="chip badge wait">Binance Testnet</span>
+          {liveLoading && <span className="chip badge wait" style={{ marginLeft: 8 }}>Carregando…</span>}
+        </div>
+        {!liveLoading && !balanceTestnet && <p className="settings-help" style={{ marginTop: 8 }}>BINANCE_TESTNET_API_KEY não configurada ou erro de conexão.</p>}
+        {balanceTestnet && (
+          <>
+            <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
+              <span className="chip">USDT livre: <strong>{Number(balanceTestnet.usdtFree).toFixed(2)}</strong></span>
+              <span className="chip">USDT bloqueado: <strong>{Number(balanceTestnet.usdtLocked).toFixed(2)}</strong></span>
+              <span className="chip">Ativos: <strong>{balanceTestnet.totalAssets}</strong></span>
+              <span className={`chip ${balanceTestnet.canTrade ? "badge buy" : "badge sell"}`}>{balanceTestnet.canTrade ? "canTrade ✓" : "canTrade ✗"}</span>
+            </div>
+            {balanceTestnet.balances?.length > 0 && (
+              <div className="table-wrap" style={{ marginTop: 8 }}>
+                <table className="table">
+                  <thead><tr><th>Ativo</th><th>Disponível</th><th>Bloqueado</th><th>Total</th></tr></thead>
+                  <tbody>
+                    {balanceTestnet.balances.map((b) => (
+                      <tr key={b.asset}>
+                        <td className="asset">{b.asset}</td>
+                        <td>{Number(b.free).toFixed(8)}</td>
+                        <td>{Number(b.locked).toFixed(8)}</td>
+                        <td>{Number(b.total).toFixed(8)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </div>
 
       <div className="card" style={{ marginTop: 12 }}>
         <div className="card-title"><strong>Contexto IA da decisão</strong><span className="chip">Explicação operacional</span></div>

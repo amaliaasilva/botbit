@@ -86,10 +86,24 @@ export async function fetchPortfolio() {
   return getJson("/portfolio", true);
 }
 
+export async function fetchBalance(account = "live") {
+  return getJson(`/portfolio/balance?account=${account}`, true);
+}
+
 export async function fetchTradeStatus() {
   return getJson("/trade/status", true);
 }
 
 export async function triggerEmergencyStop() {
   return postJson("/api/trading/emergency-stop", {}, true);
+}
+
+export async function fetchLiveQuotes(symbols) {
+  if (!symbols || !symbols.length) return [];
+  const data = await getJson(`/api/live-quotes?symbols=${symbols.join(",")}`);
+  return data?.items || [];
+}
+
+export async function fetchExplain(symbol) {
+  return getJson(`/api/explain/${encodeURIComponent(symbol)}`);
 }

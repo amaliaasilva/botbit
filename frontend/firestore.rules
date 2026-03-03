@@ -59,19 +59,23 @@ service cloud.firestore {
     }
 
     match /trading_state/{docId} {
-      allow read, write: if isAllowedAdmin();
+      allow read: if isSignedIn();
+      allow write: if isAllowedAdmin();
     }
 
     match /trading_positions/{docId} {
-      allow read, write: if isAllowedAdmin();
+      allow read: if isSignedIn();
+      allow write: if isAllowedAdmin();
     }
 
     match /trading_orders/{docId} {
-      allow read, write: if isAllowedAdmin();
+      allow read: if isSignedIn();
+      allow write: if isAllowedAdmin();
     }
 
     match /trading_config/{docId} {
-      allow read, write: if isAllowedAdmin();
+      allow read: if isSignedIn();
+      allow write: if isAllowedAdmin();
     }
 
     match /config/{docId} {
