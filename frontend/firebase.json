@@ -1,0 +1,58 @@
+{
+  "hosting": {
+    "site": "botbit",
+    "public": "out",
+    "cleanUrls": true,
+    "redirects": [
+      {
+        "source": "/login/",
+        "destination": "/login",
+        "type": 301
+      },
+      {
+        "source": "/dashboard/",
+        "destination": "/dashboard",
+        "type": 301
+      },
+      {
+        "source": "/watchlist/",
+        "destination": "/watchlist",
+        "type": 301
+      },
+      {
+        "source": "/notifications/",
+        "destination": "/notifications",
+        "type": 301
+      },
+      {
+        "source": "/settings/",
+        "destination": "/settings",
+        "type": 301
+      },
+      {
+        "source": "/assets/",
+        "destination": "/assets",
+        "type": 301
+      },
+      {
+        "source": "/backtests/",
+        "destination": "/backtests",
+        "type": 301
+      },
+      {
+        "source": "/signals/",
+        "destination": "/signals",
+        "type": 301
+      }
+    ],
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ]
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  }
+}

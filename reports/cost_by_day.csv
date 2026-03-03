@@ -1,0 +1,8 @@
+day,signal,value,mode
+2026-03-03,cloud_run_requests,,proxy_volume_30d
+2026-03-03,cloud_run_container_instances,,proxy_volume_30d
+2026-03-03,cloud_run_container_cpu,,proxy_volume_30d
+2026-03-03,cloud_run_container_memory,,proxy_volume_30d
+2026-03-03,firestore_reads,,proxy_volume_30d
+2026-03-03,firestore_writes,,proxy_volume_30d
+2026-03-03,firestore_deletes,,proxy_volume_30d

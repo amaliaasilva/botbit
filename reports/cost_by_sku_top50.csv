@@ -1,0 +1,8 @@
+service,sku,value
+proxy_metric,run.googleapis.com/request_count,
+proxy_metric,run.googleapis.com/container/instance_count,
+proxy_metric,run.googleapis.com/container/cpu/utilizations,
+proxy_metric,run.googleapis.com/container/memory/utilizations,
+proxy_metric,firestore.googleapis.com/document/read_count,
+proxy_metric,firestore.googleapis.com/document/write_count,
+proxy_metric,firestore.googleapis.com/document/delete_count,

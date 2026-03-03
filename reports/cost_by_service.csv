@@ -1,0 +1,19 @@
+service,value,mode
+Cloud Run,1,inventory_count
+Cloud Scheduler,5,inventory_count
+BigQuery Datasets,2,inventory_count
+BigQuery Tables,7,inventory_count
+Cloud NAT,0,inventory_count
+Reserved IPs,1,inventory_count
+Serverless VPC Access,1,inventory_count
+Cloud Run Requests (30d),,metric_total_30d
+Cloud Run CPU Utilization Sum (30d),,metric_total_30d
+Cloud Run Memory Utilization Sum (30d),,metric_total_30d
+Firestore Reads (30d),,metric_total_30d
+Firestore Writes (30d),,metric_total_30d
+Firestore Deletes (30d),,metric_total_30d
+botbit-api max instances,20,cloud_run_config
+botbit-api min instances,,cloud_run_config
+botbit-api concurrency,80,cloud_run_config
+botbit-api cpu,1000m,cloud_run_config
+botbit-api memory,512Mi,cloud_run_config

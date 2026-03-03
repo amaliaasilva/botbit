@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "botbit-489114"
+  },
+  "targets": {
+    "botbit-489114": {
+      "hosting": {
+        "botbit": [
+          "botbit"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

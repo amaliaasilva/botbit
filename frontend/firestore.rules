@@ -1,0 +1,98 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAllowedAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && (
+          request.auth.token.email == "amalia@aquiagov.com"
+          || request.auth.token.email == "amaliaalessa@gmail.com"
+        );
+    }
+
+    function ownerCreateTradingGlobal() {
+      return isSignedIn()
+        && isAllowedAdmin()
+        && request.resource.data.ownerUid == request.auth.uid
+        && !exists(/databases/$(database)/documents/config/trading_global);
+    }
+
+    match /public/{bucket}/items/{docId} {
+      allow read: if isAllowedAdmin();
+      allow write: if false;
+    }
+
+    match /market_latest/{symbol} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /quotes/{symbol} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /system_status/{job} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /discover_latest/{symbol} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /discover_top/{dateId}/items/{symbol} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /discovery_top/{dateId}/items/{symbol} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /discovery_runs/{runId} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /locks/{docId} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /trading_state/{docId} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /trading_positions/{docId} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /trading_orders/{docId} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /trading_config/{docId} {
+      allow read, write: if isAllowedAdmin();
+    }
+
+    match /config/{docId} {
+      allow read: if isAllowedAdmin();
+      allow write: if isAllowedAdmin() || (docId == "trading_global" && ownerCreateTradingGlobal());
+    }
+
+    match /users/{uid}/settings/{docId} {
+      allow read, write: if isAllowedAdmin() && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      allow read, write: if isAllowedAdmin() && request.auth.uid == uid;
+
+      match /watchlist/{symbol} {
+        allow read, write: if isAllowedAdmin() && request.auth.uid == uid;
+      }
+
+      match /notifications/{notificationId} {
+        allow read, write: if isAllowedAdmin() && request.auth.uid == uid;
+      }
+    }
+  }
+}
