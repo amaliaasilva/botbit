@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import IAExplainPanel from "./ui/IAExplainPanel";
+import { fetchExplain } from "../lib/backend";
 
 function metricValue(value, digits = 2) {
   if (value == null || Number.isNaN(Number(value))) return "—";
@@ -188,6 +189,21 @@ function buildExplanLevels({ symbol, market, discover, quote }) {
 }
 
 export default function AssetDetailPanel({ open, symbol, quote, market, discover, onClose }) {
+  const [aiExplain, setAiExplain] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+
+  /* Fetch AI explanation when panel opens */
+  useEffect(() => {
+    if (!open || !symbol) { setAiExplain(null); return; }
+    let cancelled = false;
+    setAiLoading(true);
+    fetchExplain(symbol)
+      .then((res) => { if (!cancelled) setAiExplain(res); })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setAiLoading(false); });
+    return () => { cancelled = true; };
+  }, [open, symbol]);
+
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event) => {
@@ -303,14 +319,21 @@ export default function AssetDetailPanel({ open, symbol, quote, market, discover
           </div>
 
           {/* ── Seção 6: IA — Por quê? ── */}
-          <IAExplainPanel
-            leigo={explanation.leigo}
-            intermediario={explanation.intermediario}
-            tecnico={explanation.tecnico}
-            significado={explanation.significado}
-            riscoPrincipal={explanation.riscoPrincipal}
-            condicaoMudar={explanation.condicaoMudar}
-          />
+          {aiLoading ? (
+            <div className="ia-panel" style={{ textAlign: "center", padding: 20 }}>
+              <div style={{ fontSize: "var(--fs-sm)", color: "var(--muted)" }}>⏳ Consultando IA...</div>
+            </div>
+          ) : (
+            <IAExplainPanel
+              leigo={aiExplain?.leigo || explanation.leigo}
+              intermediario={aiExplain?.intermediario || explanation.intermediario}
+              tecnico={aiExplain?.tecnico || explanation.tecnico}
+              significado={aiExplain?.significado || explanation.significado}
+              riscoPrincipal={aiExplain?.riscoPrincipal || explanation.riscoPrincipal}
+              condicaoMudar={aiExplain?.condicaoMudar || explanation.condicaoMudar}
+              source={aiExplain?.source}
+            />
+          )}
 
           {/* ── Tags ── */}
           {Array.isArray(discover?.tags) && discover.tags.length > 0 && (

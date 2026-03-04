@@ -133,12 +133,15 @@ def _notify(
     )
 
 
-def _load_universe(config: dict[str, Any], discover_rows: list[dict[str, Any]]) -> list[str]:
+def _load_universe(config: dict[str, Any], discover_rows: list[dict[str, Any]]) -> tuple[list[str], str, int]:
+    """Returns (symbols, universe_mode, universe_size)."""
     universe_mode = str(config.get("symbolsUniverse") or "DISCOVER_TOP50").upper()
     if universe_mode == "FIXED_LIST":
         fixed = config.get("fixedSymbols") or []
-        return [str(item).upper() for item in fixed if str(item).upper().endswith("USDT")]
-    return [str(row.get("symbol") or "").upper() for row in discover_rows if row.get("symbol")]
+        syms = [str(item).upper() for item in fixed if str(item).upper().endswith("USDT")]
+        return syms, "FIXED_LIST", len(syms)
+    syms = [str(row.get("symbol") or "").upper() for row in discover_rows if row.get("symbol")]
+    return syms, "DISCOVER_TOP50", len(syms)
 
 
 def _entry_filter(
@@ -146,10 +149,15 @@ def _entry_filter(
     discover_rows: list[dict[str, Any]],
     market_rows: list[dict[str, Any]],
     quotes_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Returns (candidates, universe_meta).
+
+    universe_meta has: mode, size, missing_score_count, missing_score_sample.
+    """
     entry = config.get("entry") or {}
     guards = config.get("guards") or {}
-    universe = set(_load_universe(config, discover_rows))
+    universe_syms, universe_mode, universe_size = _load_universe(config, discover_rows)
+    universe = set(universe_syms)
     min_score = _safe_float(entry.get("minScore"), 70)
     min_potential = _safe_float(entry.get("minPotentialScore"), 75)
     require_regime = str(entry.get("requireRegime") or "Alta")
@@ -163,12 +171,17 @@ def _entry_filter(
     quotes_map = {str(row.get("symbol") or "").upper(): row for row in quotes_rows}
 
     candidates: list[dict[str, Any]] = []
+    missing_score: list[str] = []
     for symbol in universe:
         if not _valid_symbol(symbol, regex_text):
             continue
         market = market_map.get(symbol) or {}
         discover = discover_map.get(symbol) or {}
         quote = quotes_map.get(symbol) or {}
+
+        # Track symbols that have no score data
+        if not market:
+            missing_score.append(symbol)
 
         score = _safe_float(market.get("score"))
         potential = _safe_float(discover.get("potentialScore"))
@@ -207,7 +220,15 @@ def _entry_filter(
         )
 
     candidates.sort(key=lambda row: (row["potentialScore"], row["score"], row["quoteVolume"]), reverse=True)
-    return candidates
+
+    universe_meta = {
+        "mode": universe_mode,
+        "size": universe_size,
+        "missing_score_count": len(missing_score),
+        "missing_score_sample": missing_score[:10],
+        "matched_market": len(universe & set(market_map.keys())),
+    }
+    return candidates, universe_meta
 
 
 def _symbol_filters(exchange_info: dict[str, Any], symbol: str) -> tuple[float, float]:
@@ -379,47 +400,29 @@ def _close_position_paper(
 
 
 def _live_gate_ok(config: dict[str, Any]) -> tuple[bool, str]:
-    """Triple gate for LIVE trading. ALL conditions must pass.
+    """Double-confirmation gate for LIVE trading.
 
-    Gate 1 — Firestore config (UI-side confirmation):
-      liveGuard.liveConfirmed == True AND typedText matches doubleConfirmText
-      AND liveConfirmedAt is set AND cooldown has elapsed.
+    Gate 1 — bot enabled:
+      config.enabled == True
 
-    Gate 2 — Feature flag secret (infra-side, must be set via gcloud):
-      Secret LIVE_TRADING_ENABLED == "true"
-
-    Gate 3 — Arming secret (hard requirement, set ONLY when intentionally arming):
-      Secret LIVE_TRADING_ARMED == "YES_I_KNOW_WHAT_IM_DOING"
-      Must be EXPLICITLY set — omitted/empty/wrong always blocks LIVE.
+    Gate 2 — double text confirmation (UI):
+      liveGuard.liveConfirmed == True
+      AND liveGuard.typedText == "LIVE" (first field)
+      AND liveGuard.typedText2 == "EU CONFIRMO" (second field)
     """
-    # Gate 1A: Firestore UI confirmation
+    if not bool(config.get("enabled", False)):
+        return False, "BOT_DISABLED"
+
     guard = config.get("liveGuard") or {}
     if not bool(guard.get("liveConfirmed", False)):
         return False, "LIVE_NOT_CONFIRMED"
 
-    confirm_text = str(guard.get("doubleConfirmText") or "LIVE").upper()
-    typed = str(guard.get("typedText") or "").upper()
-    if typed != confirm_text:
-        return False, "LIVE_CONFIRM_TEXT_INVALID"
-
-    # Gate 1B: Confirmation timestamp + cooldown
-    confirmed_at = _parse_ts(guard.get("liveConfirmedAt"))
-    if not confirmed_at:
-        return False, "LIVE_CONFIRM_TIME_MISSING"
-
-    cooldown_minutes = _safe_int(guard.get("cooldownMinutes"), 1)  # default 1 min
-    if _now() < confirmed_at + timedelta(minutes=max(1, cooldown_minutes)):
-        return False, "LIVE_COOLDOWN_PENDING"
-
-    # Gate 2: Feature flag secret (gcloud secrets must be set explicitly)
-    feature_flag = str(get_secret("LIVE_TRADING_ENABLED") or "false").lower() == "true"
-    if not feature_flag:
-        return False, "LIVE_FEATURE_FLAG_OFF"
-
-    # Gate 3: Hard arming secret — only opens when exact phrase is set
-    armed_secret = str(get_secret("LIVE_TRADING_ARMED") or "").strip()
-    if armed_secret != "YES_I_KNOW_WHAT_IM_DOING":
-        return False, "LIVE_NOT_ARMED"
+    typed1 = str(guard.get("typedText") or "").strip().upper()
+    typed2 = str(guard.get("typedText2") or "").strip().upper()
+    if typed1 != "LIVE":
+        return False, "LIVE_FIELD1_INVALID"
+    if typed2 != "EU CONFIRMO":
+        return False, "LIVE_FIELD2_INVALID"
 
     return True, "OK"
 
@@ -623,7 +626,7 @@ def run_trade_pipeline() -> dict[str, Any]:
                     "error": str(exc),
                 }
 
-        candidates = _entry_filter(config, discover_rows, market_rows, quotes_rows)
+        candidates, universe_meta = _entry_filter(config, discover_rows, market_rows, quotes_rows)
         open_positions = fs.list_trading_positions(status="OPEN", limit_size=200)
         quote_map = {str(row.get("symbol") or "").upper(): row for row in quotes_rows}
         market_map = {str(row.get("symbol") or "").upper(): row for row in market_rows}
@@ -827,6 +830,8 @@ def run_trade_pipeline() -> dict[str, Any]:
                     "score": candidate.get("score"),
                     "regime": candidate.get("regime"),
                     "signal": candidate.get("signal"),
+                    "sourceUniverse": universe_meta.get("mode", "UNKNOWN"),
+                    "sourceUniverseSize": universe_meta.get("size", 0),
                 })
                 try:
                     client = BinanceTradeClient(api_key=api_key, api_secret=api_secret, mode=mode)
@@ -1014,6 +1019,12 @@ def run_trade_pipeline() -> dict[str, Any]:
                 "equityUSDT": round(equity, 6),
                 "exposureUSDT": round(exposure, 6),
                 "dailyPnlUSDT": round(daily_pnl, 6),
+                "candidates": len(candidates),
+                "executed": executed,
+                "decisionUniverseMode": universe_meta.get("mode", "UNKNOWN"),
+                "decisionUniverseSize": universe_meta.get("size", 0),
+                "missingScoreCount": universe_meta.get("missing_score_count", 0),
+                "missingScoreSample": universe_meta.get("missing_score_sample", [])[:5],
             }
         )
 

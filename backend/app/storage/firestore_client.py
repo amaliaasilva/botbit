@@ -103,6 +103,51 @@ class FirestoreNotificationStorage:
         doc_ref_v2.set(body, merge=True)
         self.client.collection("public").document("discover_top").collection("items").document(symbol.upper()).set(body, merge=True)
 
+    # ── Score Universe governance ──────────────────────────────────────────
+
+    def get_score_universe(self) -> dict[str, Any] | None:
+        """Read config/score_universe_current."""
+        snap = self.client.collection("config").document("score_universe_current").get()
+        if not snap.exists:
+            return None
+        return snap.to_dict()
+
+    def upsert_score_universe(self, payload: dict[str, Any]) -> None:
+        """Write config/score_universe_current."""
+        doc_ref = self.client.collection("config").document("score_universe_current")
+        body = {"updatedAt": datetime.utcnow(), **payload}
+        doc_ref.set(body, merge=True)
+
+    def delete_stale_market_docs(self, valid_symbols: list[str]) -> int:
+        """Remove docs from market_latest and public/market_top/items that are
+        no longer in the active score universe.  Returns count of deleted docs."""
+        valid_set = {s.upper() for s in valid_symbols}
+        deleted = 0
+        for doc in self.client.collection("market_latest").stream():
+            if doc.id not in valid_set:
+                doc.reference.delete()
+                deleted += 1
+        for doc in self.client.collection("public").document("market_top").collection("items").stream():
+            if doc.id not in valid_set:
+                doc.reference.delete()
+                deleted += 1
+        return deleted
+
+    def delete_stale_quote_docs(self, valid_symbols: list[str]) -> int:
+        """Remove docs from quotes and public/quotes_top/items that are
+        no longer in the active score universe.  Returns count of deleted docs."""
+        valid_set = {s.upper() for s in valid_symbols}
+        deleted = 0
+        for doc in self.client.collection("quotes").stream():
+            if doc.id not in valid_set:
+                doc.reference.delete()
+                deleted += 1
+        for doc in self.client.collection("public").document("quotes_top").collection("items").stream():
+            if doc.id not in valid_set:
+                doc.reference.delete()
+                deleted += 1
+        return deleted
+
     def list_discovery_latest(self, limit_size: int = 50) -> list[dict[str, Any]]:
         query = (
             self.client.collection("discover_latest")

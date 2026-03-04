@@ -29,7 +29,7 @@ const SECTIONS = [
         steps: [
           {
             label: "1. Coleta de dados",
-            text: "A cada 5 minutos, o robô busca os preços das 50 principais criptomoedas na Binance.",
+            text: "A cada 5 minutos, o robô busca os preços dos 12 ativos monitorados na Binance. A cada hora, recalcula indicadores técnicos com os últimos 1000 candles de 4h. A cada 6 horas, escaneia os top 50 por volume.",
           },
           {
             label: "2. Cálculo de indicadores",
@@ -198,6 +198,120 @@ const SECTIONS = [
     ],
   },
   {
+    id: "arquitetura",
+    title: "Arquitetura: como o app funciona por dentro",
+    icon: "⚡",
+    content: [
+      {
+        type: "text",
+        text: "O BotBit funciona com 4 jobs automáticos que rodam em Cloud Run (Google Cloud). Cada job tem uma frequência e uma responsabilidade específica:",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            label: "1. Cotações (a cada 5 min)",
+            text: "O job botbit-quotes-5m busca o preço atual dos 12 ativos monitorados na Binance e salva no Firestore. É isso que atualiza os preços que você vê em todas as telas.",
+          },
+          {
+            label: "2. Score & Regime (a cada hora)",
+            text: "O job botbit-score-60m busca os últimos 1000 candles de 4h de cada ativo, calcula EMA50/200, RSI14, ATR14, e gera o score (0–100), regime (Alta/Baixa/Neutro/Lateral) e sinal (BUY/SELL/WAIT/AVOID). Esses dados alimentam o tab Mercado.",
+          },
+          {
+            label: "3. Discover (a cada 6 horas)",
+            text: "O job botbit-discover-6h escaneia TODOS os pares USDT da Binance (centenas), filtra os top 50 por volume (mínimo 5M USDT), e calcula um potentialScore com tags como BREAKOUT_VOLUME, SQUEEZE_RELEASE etc. Esses dados alimentam o tab Discover.",
+          },
+          {
+            label: "4. Trading (a cada 5 min)",
+            text: "O job botbit-trade-5m cruza os dados do Discover (50 ativos) + Score (12 ativos) + Cotações. Filtra candidatos que atendem todos os critérios (score ≥ 65, potentialScore ≥ 70, regime Alta, sinal BUY). Se encontrar, abre posição com stop-loss e take-profit automáticos.",
+          },
+        ],
+      },
+      {
+        type: "text",
+        text: "O tab Mercado mostra 12 ativos: 10 vêm de uma lista predefinida (BTC, ETH, BNB, SOL, XRP, ADA, DOGE, TRX, LINK, AVAX) e 2 vagas são preenchidas dinamicamente pelos ativos com maior volume na Binance. O tab Discover mostra os top 50 por volume — é um universo bem maior.",
+      },
+    ],
+  },
+  {
+    id: "fluxo-trade",
+    title: "Como uma ordem é executada passo a passo",
+    icon: "▶",
+    content: [
+      {
+        type: "steps",
+        steps: [
+          {
+            label: "1. Seleção do universo",
+            text: "O robô carrega a lista de ativos candidatos. Hoje está configurado como DISCOVER_TOP50 — ou seja, usa os 50 ativos do Discover como ponto de partida.",
+          },
+          {
+            label: "2. Cruzamento de dados",
+            text: "Para cada ativo candidato, o robô cruza 3 fontes: score do Market (precisa ≥ 65), potentialScore do Discover (precisa ≥ 70), e cotação atual (volume ≥ 5M USDT).",
+          },
+          {
+            label: "3. Filtros de entrada",
+            text: "Só passa quem tiver: regime = Alta, sinal = BUY, volatilidade (ATR) ≤ 6%, e match no regex de símbolo válido. Na prática, muito poucos passam todos os filtros.",
+          },
+          {
+            label: "4. Limites de risco",
+            text: "Mesmo se um ativo passar, o robô verifica: máximo 1 posição aberta, máximo 1 trade por dia, cooldown de 24h se o último trade bateu stop. Se qualquer limite estiver no teto, não opera.",
+          },
+          {
+            label: "5. Cálculo da ordem",
+            text: "O robô calcula: quanto investir (até 35% do equity), quantidade de moedas, preço de stop-loss (entrada − 1.5 × ATR) e take-profit (entrada + 2.5 × ATR).",
+          },
+          {
+            label: "6. Execução",
+            text: "Em PAPER: cria posição virtual, debita o saldo simulado. Em TESTNET: envia ordem LIMIT BUY para a Binance Testnet via trade_intent. Em LIVE: envia ordem real para a Binance + OCO (stop+take) para proteção automática.",
+          },
+          {
+            label: "7. Gestão da posição aberta",
+            text: "A cada 5 minutos, o robô verifica todas as posições abertas: atualiza trailing stop (máximo entre entrada e preço − 1.2×ATR), move stop para breakeven se R/R ≥ 1.0, fecha se atingir time-stop (48h sem alvo).",
+          },
+        ],
+      },
+      {
+        type: "text",
+        text: "Importante: o modo LIVE tem 3 camadas de segurança além dos filtros — precisa de confirmação no Firestore, secret LIVE_TRADING_ENABLED=true, e secret LIVE_TRADING_ARMED. Se a perda diária atingir 2.5% do equity, o robô trava automaticamente.",
+      },
+    ],
+  },
+  {
+    id: "universos",
+    title: "Mercado vs Discover vs Watchlist — qual é qual?",
+    icon: "◈",
+    content: [
+      {
+        type: "cards",
+        cards: [
+          {
+            label: "Mercado (12 ativos)",
+            badge: "Score + Regime",
+            badgeClass: "badge buy",
+            text: "Os 12 ativos que o robô monitora com score completo (indicadores técnicos, regime, sinal). 10 são predefinidos + 2 dinâmicos por volume. Atualizado a cada hora.",
+          },
+          {
+            label: "Discover (50 ativos)",
+            badge: "Scanner amplo",
+            badgeClass: "badge wait",
+            text: "Escaneia toda a Binance e seleciona os top 50 por volume. Calcula potentialScore com tags de padrão (breakout, squeeze etc). Atualizado a cada 6 horas.",
+          },
+          {
+            label: "Watchlist (você escolhe)",
+            badge: "Pessoal",
+            badgeClass: "badge buy",
+            text: "Sua lista pessoal de ativos para acompanhar. Você adiciona qualquer par USDT. Os dados de score e cotação vêm dos outros pipelines — só aparece score se o ativo estiver nos 12 do Mercado.",
+          },
+        ],
+      },
+      {
+        type: "text",
+        text: "Para o trading automático, o robô cruza Discover (50) + Mercado (12). Na prática, só os ativos que estão em AMBOS podem ser operados — ou seja, o universo efetivo é de até 12 ativos.",
+      },
+    ],
+  },
+  {
     id: "calculos",
     title: "Como os cálculos funcionam (sem complicar)",
     icon: "◎",
@@ -250,7 +364,7 @@ const SECTIONS = [
           {
             label: "Dashboard",
             icon: "▦",
-            text: "Visão geral do mercado. Mostra os principais ativos da sua watchlist com score, sinal e preço em tempo real. Ponto de partida para entender o estado atual do mercado.",
+            text: "Visão geral com 3 tabs: Mercado (12 ativos com score, regime e sinal atualizados a cada hora), Watchlist (seus ativos pessoais), e Discover (top 50 por volume). Clique em qualquer ativo para ver análise detalhada com explicação da IA.",
           },
           {
             label: "Portfolio",

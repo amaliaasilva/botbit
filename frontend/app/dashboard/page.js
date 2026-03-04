@@ -15,6 +15,7 @@ import {
   subscribeDiscoverLatest,
   subscribeMarketRanking,
   subscribeQuotes,
+  subscribeScoreUniverse,
   subscribeTradingState,
   subscribeWatchlist,
 } from "../../lib/firestore";
@@ -135,6 +136,7 @@ function MercadoTab() {
   const [selectedSymbol, setSelectedSymbol] = useState("BTCUSDT");
   const [tradingState, setTradingState] = useState(null);
   const [discoverMap, setDiscoverMap] = useState({});
+  const [scoreUniverse, setScoreUniverse] = useState(null);
 
   useEffect(() => {
     setLoading(true);
@@ -143,6 +145,8 @@ function MercadoTab() {
       setLoading(false);
     });
   }, []);
+
+  useEffect(() => { return subscribeScoreUniverse((d) => setScoreUniverse(d)); }, []);
 
   /* Load discover data for ranking symbols whenever ranking updates */
   useEffect(() => {
@@ -210,6 +214,24 @@ function MercadoTab() {
           value: String(ranking.length),
         },
       ]} />
+
+      {/* Universe governance badge */}
+      {scoreUniverse && (
+        <div className="card" style={{ marginBottom: 12, padding: "8px 14px", display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 13, opacity: 0.85 }}>
+          <span className="chip badge" style={{ fontSize: 11 }}>Score Universe</span>
+          <span>{scoreUniverse.size || "?"} ativos</span>
+          <span style={{ opacity: 0.5 }}>|</span>
+          <span>Fonte: {scoreUniverse.source || "discover"}</span>
+          <span style={{ opacity: 0.5 }}>|</span>
+          <span>Gira: {scoreUniverse.rotateHours || "?"}h</span>
+          {scoreUniverse.updatedAt && (
+            <>
+              <span style={{ opacity: 0.5 }}>|</span>
+              <span>Atualizado: {(scoreUniverse.updatedAt?.toDate?.() || new Date(scoreUniverse.updatedAt)).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+            </>
+          )}
+        </div>
+      )}
 
       {loading && <div className="chip" style={{ marginBottom: 12 }}>Carregando ranking...</div>}
 
@@ -656,7 +678,7 @@ function DiscoverTab({ uid }) {
         </div>
         {actionMsg ? <div className="action-msg" style={{ marginBottom: 8 }}>{actionMsg}</div> : null}
         <p className="settings-help" style={{ marginBottom: 10 }}>
-          O Discover escaneia os 50 maiores da Binance automaticamente. Clique num ativo para análise detalhada.
+          O Discover escaneia os top 50 por volume da Binance a cada 6h. Os melhores alimentam o Score Universe que o trading usa para decidir.
         </p>
         <div className="filter-row">
           <div className="filter-group">

@@ -167,6 +167,68 @@ def _calc_features(symbol: str, klines: pd.DataFrame, btc_returns: pd.Series) ->
     }
 
 
+def _rotate_score_universe(
+    fs_storage: FirestoreNotificationStorage,
+    discover_items: list[dict[str, Any]],
+    settings: Any,
+) -> None:
+    """Rotate config/score_universe_current using discover results.
+
+    Only rotates if enough time (rotateHours) has elapsed since last update.
+    Always ensures BTCUSDT is included as the first symbol.
+    """
+    size = settings.score_universe_size  # default 30
+    rotate_hours = settings.score_universe_rotate_hours  # default 12
+
+    existing = fs_storage.get_score_universe()
+    if existing:
+        updated_at = existing.get("updatedAt")
+        if updated_at:
+            if hasattr(updated_at, "tzinfo") and updated_at.tzinfo is not None:
+                updated_at = updated_at.replace(tzinfo=None)
+            elapsed_hours = (datetime.utcnow() - updated_at).total_seconds() / 3600.0
+            if elapsed_hours < rotate_hours:
+                log_event(
+                    logger,
+                    "score_universe_skip_rotation",
+                    elapsed_hours=round(elapsed_hours, 1),
+                    rotate_hours=rotate_hours,
+                )
+                return
+
+    # Build new universe: BTCUSDT first, then top by potentialScore
+    symbols = ["BTCUSDT"]
+    for item in discover_items:
+        sym = str(item.get("symbol") or "").upper()
+        if sym and sym not in symbols and _valid_symbol(sym):
+            symbols.append(sym)
+        if len(symbols) >= size:
+            break
+
+    previous_symbols = (existing or {}).get("symbols") or []
+    added = [s for s in symbols if s not in previous_symbols]
+    removed = [s for s in previous_symbols if s not in symbols]
+
+    fs_storage.upsert_score_universe(
+        {
+            "symbols": symbols,
+            "size": len(symbols),
+            "rotateHours": rotate_hours,
+            "source": "discover_latest",
+            "previousSize": len(previous_symbols),
+            "added": added[:20],
+            "removed": removed[:20],
+        }
+    )
+    log_event(
+        logger,
+        "score_universe_rotated",
+        size=len(symbols),
+        added=len(added),
+        removed=len(removed),
+    )
+
+
 def run_discover_pipeline() -> dict[str, Any]:
     settings = get_settings()
     fs_storage = FirestoreNotificationStorage(settings.gcp_project_id)
@@ -206,6 +268,9 @@ def run_discover_pipeline() -> dict[str, Any]:
         fs_storage.upsert_discovery_latest(row["symbol"], row)
     for row in top:
         fs_storage.upsert_discovery_top_item(date_key, row["symbol"], row)
+
+    # ── Rotate Score Universe ─────────────────────────────────────────────
+    _rotate_score_universe(fs_storage, items, settings)
 
     fs_storage.upsert_discovery_run(
         run_id,

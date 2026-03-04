@@ -25,6 +25,7 @@ export default function IAExplainPanel({
   significado,
   riscoPrincipal,
   condicaoMudar,
+  source,
 }) {
   const [level, setLevel] = useState("leigo");
 
@@ -37,6 +38,11 @@ export default function IAExplainPanel({
           <circle cx="8" cy="12" r=".8" fill="currentColor" />
         </svg>
         IA — Por quê?
+        {source === "gemini" && (
+          <span style={{ marginLeft: 8, fontSize: 10, color: "var(--accent)", fontWeight: 600, letterSpacing: 0.5 }}>
+            ✦ Gemini
+          </span>
+        )}
       </div>
       <div className="ia-panel-body">
         <div className="ia-level-tabs">

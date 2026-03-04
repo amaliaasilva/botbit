@@ -24,6 +24,8 @@ class Settings:
     discover_top_n: int = int(os.getenv("DISCOVER_TOP_N", "50"))
     discover_candidate_kline_n: int = int(os.getenv("DISCOVER_CANDIDATE_KLINE_N", "100"))
     discover_liquidity_min_quote_volume: float = float(os.getenv("DISCOVER_LIQUIDITY_MIN_QUOTE_VOLUME", "5000000"))
+    score_universe_size: int = int(os.getenv("SCORE_UNIVERSE_SIZE", "30"))
+    score_universe_rotate_hours: int = int(os.getenv("SCORE_UNIVERSE_ROTATE_HOURS", "12"))
     trade_loop_symbols_top_n: int = int(os.getenv("TRADE_LOOP_SYMBOLS_TOP_N", "10"))
     trade_default_mode: str = os.getenv("TRADE_DEFAULT_MODE", "TESTNET")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")

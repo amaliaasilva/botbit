@@ -116,6 +116,27 @@ export async function listMarketScores(symbols) {
   return results.flat();
 }
 
+export async function listDiscoverScores(symbols) {
+  if (!db || !Array.isArray(symbols) || symbols.length === 0) return [];
+  const normalized = symbols.map((s) => String(s || "").toUpperCase()).filter(Boolean);
+  if (!normalized.length) return [];
+
+  const ref = collection(db, "public", "discover_top", "items");
+  const chunks = [];
+  for (let i = 0; i < normalized.length; i += 10) {
+    chunks.push(normalized.slice(i, i + 10));
+  }
+
+  const results = await Promise.all(
+    chunks.map(async (chunk) => {
+      const snap = await getDocs(query(ref, where("symbol", "in", chunk)));
+      return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    })
+  );
+
+  return results.flat();
+}
+
 export async function listMarketRanking(limitSize = 20) {
   if (!db) return [];
   const ref = collection(db, "public", "market_top", "items");
@@ -261,5 +282,14 @@ export function subscribePendingIntents(onData, limitSize = 20) {
   const q = query(ref, where("status", "==", "PENDING"), limit(Math.max(1, limitSize)));
   return onSnapshot(q, (snap) => {
     onData(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  });
+}
+
+export function subscribeScoreUniverse(onData) {
+  if (!db) return () => {};
+  const ref = doc(db, "config", "score_universe_current");
+  return onSnapshot(ref, (snap) => {
+    if (!snap.exists()) { onData(null); return; }
+    onData(snap.data());
   });
 }
