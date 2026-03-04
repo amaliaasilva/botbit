@@ -329,7 +329,7 @@ def api_trading_live_gate_status(auth: AuthContext = Depends(require_auth)) -> d
     g2_confirmed = bool(guard.get("liveConfirmed", False))
     g2_text_ok = typed == confirm_text
 
-    cooldown_minutes = int(guard.get("cooldownMinutes") or 5)
+    cooldown_minutes = int(guard.get("cooldownMinutes") or 1)  # default 1 min
     cooldown_remaining = 0.0
     confirmed_at = _parse_ts(guard.get("liveConfirmedAt"))
     if confirmed_at:
@@ -343,12 +343,21 @@ def api_trading_live_gate_status(auth: AuthContext = Depends(require_auth)) -> d
 
     gate_ok, gate_reason = _live_gate_ok(config)
 
+    # Alert infra diagnostics (no secret values exposed)
+    webhook_url = get_secret("APP_SCRIPT_WEBHOOK_URL") or ""
+    webhook_token = get_secret("ALERT_WEBHOOK_TOKEN") or ""
+    alert_email = get_secret("ALERT_OWNER_EMAIL") or ""
+
     return {
         "ok": gate_ok,
         "reason": gate_reason,
         "mode": str(config.get("mode") or "PAPER").upper(),
         "enabled": g1_enabled,
         "cooldownRemainingMinutes": round(cooldown_remaining, 1),
+        "alertsConfigured": bool(webhook_url and webhook_token and alert_email),
+        "alertWebhookSet": bool(webhook_url),
+        "alertTokenSet": bool(webhook_token),
+        "alertEmailSet": bool(alert_email),
         "gates": {
             "g1_enabled": g1_enabled,
             "g1_mode_live": g1_mode_live,
@@ -360,6 +369,61 @@ def api_trading_live_gate_status(auth: AuthContext = Depends(require_auth)) -> d
             "g4_armed": g4_armed,
         },
     }
+
+
+@app.post("/api/alerts/test")
+def api_alerts_test(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
+    """Envia notificação de teste via AppScript e salva in-app no Firestore."""
+    from app.alerts.appscript_email import AppScriptEmailAlerter
+    settings = get_settings()
+    fs = FirestoreNotificationStorage(settings.gcp_project_id)
+
+    webhook_url = get_secret("APP_SCRIPT_WEBHOOK_URL") or ""
+    token = get_secret("ALERT_WEBHOOK_TOKEN") or ""
+    email = get_secret("ALERT_OWNER_EMAIL") or ""
+
+    alerter = AppScriptEmailAlerter(webhook_url, token)
+    result: dict[str, Any] = {
+        "webhookConfigured": bool(webhook_url),
+        "tokenConfigured": bool(token),
+        "emailConfigured": bool(email),
+        "emailTarget": (email[:3] + "***@" + email.split("@")[-1]) if "@" in email else (email[:4] + "***" if email else ""),
+    }
+
+    # Always write Firestore in-app notification
+    test_id = f"test-{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}-{auth.uid[:6]}"
+    fs.add_notification(
+        auth.uid,
+        test_id,
+        {
+            "type": "TEST_ALERT",
+            "symbol": "SYSTEM",
+            "signal": "TEST",
+            "title": "Teste de notificação",
+            "message": "Esta é uma notificação de teste enviada manualmente pelo painel de settings.",
+            "emailSent": False,
+            "score": 0,
+        },
+    )
+    result["inAppWritten"] = True
+
+    if alerter.is_enabled() and email:
+        try:
+            ok = alerter.send_email(
+                email,
+                "[BotBit] 🔔 Teste de alerta",
+                f"Notificação de teste enviada por {auth.uid[:8]} em {datetime.utcnow().isoformat()}Z.",
+                {"test": True, "uid": auth.uid[:8]},
+            )
+            result["emailSent"] = ok
+        except Exception as exc:
+            result["emailSent"] = False
+            result["emailError"] = str(exc)[:300]
+    else:
+        result["emailSent"] = False
+        result["emailSkipped"] = "webhook ou token não configurado no Cloud Run"
+
+    return {"ok": True, **result}
 
 
 @app.post("/api/trading/emergency-stop")

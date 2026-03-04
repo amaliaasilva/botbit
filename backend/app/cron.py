@@ -179,24 +179,24 @@ def _send_alert_if_needed(
     )
     subject = f"[BotBit] {alert_type} - {symbol}"
 
-    if alerter.send_email(destination_email, subject, message, {"symbol": symbol, "event": alert_type}):
-        storage.insert_alert(alert_id, symbol, str(latest_signal), datetime.fromisoformat(str(latest.get("ts")).replace("Z", "+00:00")))
-        if fs_storage and owner_uid:
-            fs_storage.add_notification(
-                owner_uid,
-                alert_id,
-                {
-                    "type": "MARKET_ALERT",
-                    "symbol": symbol,
-                    "signal": latest_signal,
-                    "regime": latest_regime,
-                    "score": current_score,
-                    "message": message,
-                    "emailSent": True,
-                },
-            )
-        return True
-    return False
+    # Always persist in BigQuery + Firestore regardless of email outcome
+    storage.insert_alert(alert_id, symbol, str(latest_signal), datetime.fromisoformat(str(latest.get("ts")).replace("Z", "+00:00")))
+    email_ok = alerter.send_email(destination_email, subject, message, {"symbol": symbol, "event": alert_type})
+    if fs_storage and owner_uid:
+        fs_storage.add_notification(
+            owner_uid,
+            alert_id,
+            {
+                "type": "MARKET_ALERT",
+                "symbol": symbol,
+                "signal": latest_signal,
+                "regime": latest_regime,
+                "score": current_score,
+                "message": message,
+                "emailSent": email_ok,
+            },
+        )
+    return True
 
 
 def _resolve_universe(binance: BinanceClient) -> list[str]:

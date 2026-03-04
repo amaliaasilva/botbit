@@ -127,3 +127,7 @@ export async function fetchExecutorApiStatus() {
 export async function fetchLiveGateStatus() {
   return getJson("/api/trading/live-gate-status", true);
 }
+
+export async function triggerAlertTest() {
+  return postJson("/api/alerts/test", {}, true);
+}

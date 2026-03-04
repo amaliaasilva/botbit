@@ -407,7 +407,7 @@ def _live_gate_ok(config: dict[str, Any]) -> tuple[bool, str]:
     if not confirmed_at:
         return False, "LIVE_CONFIRM_TIME_MISSING"
 
-    cooldown_minutes = _safe_int(guard.get("cooldownMinutes"), 5)
+    cooldown_minutes = _safe_int(guard.get("cooldownMinutes"), 1)  # default 1 min
     if _now() < confirmed_at + timedelta(minutes=max(1, cooldown_minutes)):
         return False, "LIVE_COOLDOWN_PENDING"
 

@@ -7,7 +7,7 @@ import { getUserSettings, updateUserSettings } from "../../lib/firestore";
 import { useRouter } from "next/navigation";
 import AppShell from "../../components/AppShell";
 import { emergencyStopTrading, subscribeTradingConfig, subscribeTradingState, updateTradingConfig, subscribeExecutorStatus, subscribePendingIntents } from "../../lib/firestore";
-import { fetchBinanceValidate, fetchLiveGateStatus } from "../../lib/backend";
+import { fetchBinanceValidate, fetchLiveGateStatus, triggerAlertTest } from "../../lib/backend";
 
 const TABS = [
   { id: "profile", label: "Perfil", hint: "Notificações e preferências" },
@@ -56,6 +56,8 @@ export default function SettingsPage() {
   const [gateStatus, setGateStatus] = useState(null);
   const [gateLoading, setGateLoading] = useState(false);
   const [showLiveConfirm, setShowLiveConfirm] = useState(false);
+  const [alertTestResult, setAlertTestResult] = useState(null);
+  const [alertTestLoading, setAlertTestLoading] = useState(false);
 
   const [costData, setCostData] = useState(null);
   const [costLoading, setCostLoading] = useState(false);
@@ -163,6 +165,19 @@ export default function SettingsPage() {
       setGateStatus({ error: e.message });
     } finally {
       setGateLoading(false);
+    }
+  }
+
+  async function sendTestAlert() {
+    setAlertTestLoading(true);
+    setAlertTestResult(null);
+    try {
+      const res = await triggerAlertTest();
+      setAlertTestResult(res);
+    } catch (e) {
+      setAlertTestResult({ ok: false, error: e.message });
+    } finally {
+      setAlertTestLoading(false);
     }
   }
 
@@ -570,6 +585,71 @@ python tools/testnet_executor.py`}</pre>
                   </>
                 ) : (
                   <div className="row"><span style={{ color: "var(--danger)" }}>Erro</span><span className="mono" style={{ color: "#FCA5A5" }}>{binanceValidation.error}</span></div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* ── Testar notificações ── */}
+          <div className="card" style={{ marginTop: 12 }}>
+            <div className="card-title">
+              <strong>Notificações</strong>
+              {gateStatus && (
+                <span className={`chip badge ${gateStatus.alertsConfigured ? "buy" : "avoid"}`}>
+                  {gateStatus.alertsConfigured ? "✓ Webhook configurado" : "⚠ Webhook não configurado"}
+                </span>
+              )}
+            </div>
+            <p className="settings-help">
+              Alertas automáticos vão para o email via AppScript quando há sinal BUY, mudança de regime ou score jump ≥10.
+              Os alertas in-app (sino) funcionam independente do email.
+            </p>
+
+            {/* Diagnóstico inline se já consultou o gate status */}
+            {gateStatus && !gateStatus.error && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                <span className={`chip badge ${gateStatus.alertWebhookSet ? "buy" : "avoid"}`}>
+                  AppScript URL {gateStatus.alertWebhookSet ? "✓" : "✗ não montada"}
+                </span>
+                <span className={`chip badge ${gateStatus.alertTokenSet ? "buy" : "avoid"}`}>
+                  Token {gateStatus.alertTokenSet ? "✓" : "✗ não montado"}
+                </span>
+                <span className={`chip badge ${gateStatus.alertEmailSet ? "buy" : "avoid"}`}>
+                  Email destino {gateStatus.alertEmailSet ? "✓" : "✗ não montado"}
+                </span>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <button className="btn" onClick={sendTestAlert} disabled={alertTestLoading}>
+                {alertTestLoading ? "Enviando…" : "🔔 Enviar notificação de teste"}
+              </button>
+              {!gateStatus && (
+                <button className="btn" onClick={loadGateStatus} disabled={gateLoading}
+                  style={{ fontSize: "var(--fs-xs)", padding: "5px 12px" }}>
+                  {gateLoading ? "…" : "Verificar configuração"}
+                </button>
+              )}
+            </div>
+
+            {alertTestResult && (
+              <div style={{
+                marginTop: 10, padding: "10px 14px", borderRadius: 6,
+                background: alertTestResult.ok ? "var(--good-dim)" : "var(--danger-dim)",
+                border: `1px solid ${alertTestResult.ok ? "rgba(34,197,94,.3)" : "rgba(239,68,68,.3)"}`,
+              }}>
+                {alertTestResult.ok ? (
+                  <>
+                    <div className="row"><span>Notif. in-app escrita</span><span className="mono" style={{ color: "var(--good)" }}>{alertTestResult.inAppWritten ? "✓ Sim" : "✗ Não"}</span></div>
+                    <div className="row"><span>Email enviado</span><span className="mono" style={{ color: alertTestResult.emailSent ? "var(--good)" : "var(--warn)" }}>{alertTestResult.emailSent ? `✓ Enviado para ${alertTestResult.emailTarget}` : "Não enviado"}</span></div>
+                    {alertTestResult.emailSkipped && <div className="row"><span>Motivo</span><span className="mono" style={{ color: "var(--muted)" }}>{alertTestResult.emailSkipped}</span></div>}
+                    {alertTestResult.emailError && <div className="row"><span>Erro email</span><span className="mono" style={{ color: "#FCA5A5" }}>{alertTestResult.emailError}</span></div>}
+                    <div className="row"><span>Webhook</span><span className="mono">{alertTestResult.webhookConfigured ? "✓" : "✗"}</span></div>
+                    <div className="row"><span>Token</span><span className="mono">{alertTestResult.tokenConfigured ? "✓" : "✗"}</span></div>
+                    <div className="row"><span>Email destino</span><span className="mono">{alertTestResult.emailConfigured ? `✓ ${alertTestResult.emailTarget}` : "✗ não configurado"}</span></div>
+                  </>
+                ) : (
+                  <div className="row"><span style={{ color: "var(--danger)" }}>Erro</span><span className="mono" style={{ color: "#FCA5A5" }}>{alertTestResult.error}</span></div>
                 )}
               </div>
             )}
