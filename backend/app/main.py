@@ -360,9 +360,12 @@ def api_alerts_test(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]
 
     webhook_url = get_secret("APP_SCRIPT_WEBHOOK_URL") or ""
     token = get_secret("ALERT_WEBHOOK_TOKEN") or ""
-    owner_email = get_secret("ALERT_OWNER_EMAIL") or ""
+    owner_emails_raw = get_secret("ALERT_OWNER_EMAIL") or ""
 
-    # Also read user's alertEmail from Firestore profile settings
+    # ALERT_OWNER_EMAIL pode conter múltiplos emails separados por vírgula
+    base_emails = [e.strip() for e in owner_emails_raw.split(",") if e.strip()]
+
+    # Também lê alertEmail do perfil Firestore do usuário
     extra_email = ""
     try:
         user_doc = fs.client.collection("users").document(auth.uid).get()
@@ -372,7 +375,7 @@ def api_alerts_test(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]
         pass
 
     # Collect unique non-empty recipients
-    all_emails = list(dict.fromkeys(e.strip() for e in [owner_email, extra_email] if e.strip()))
+    all_emails = list(dict.fromkeys(base_emails + [e.strip() for e in [extra_email] if e.strip()]))
 
     def _mask(e: str) -> str:
         if "@" not in e:

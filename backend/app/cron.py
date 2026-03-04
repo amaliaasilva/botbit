@@ -324,6 +324,9 @@ def run_score_pipeline() -> dict[str, Any]:
     alert_owner_uid = get_secret("FIREBASE_OWNER_UID") or ""
     alerter = AppScriptEmailAlerter(app_script_webhook_url, alert_webhook_token)
 
+    # ALERT_OWNER_EMAIL pode conter múltiplos emails separados por vírgula
+    owner_email_list = [e.strip() for e in alert_owner_email.split(",") if e.strip()]
+
     # Also collect alertEmail from Firestore users who opted in
     extra_emails: list[str] = []
     if fs_storage:
@@ -333,11 +336,11 @@ def run_score_pipeline() -> dict[str, Any]:
                 if doc.exists:
                     d = doc.to_dict() or {}
                     user_email = str(d.get("alertEmail") or "").strip()
-                    if user_email and user_email != alert_owner_email and user_email not in extra_emails:
+                    if user_email and user_email not in owner_email_list and user_email not in extra_emails:
                         extra_emails.append(user_email)
         except Exception as exc:
             log_event(logger, "extra_emails_fetch_failed", error=str(exc))
-    all_alert_emails = [e for e in [alert_owner_email] + extra_emails if e]
+    all_alert_emails = owner_email_list + extra_emails
 
     symbols = _resolve_universe(binance, fs_storage)
 
