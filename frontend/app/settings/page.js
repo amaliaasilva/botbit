@@ -731,19 +731,49 @@ python tools/testnet_executor.py`}</pre>
             borderLeft: `4px solid ${tradingConfig?.resting?.enabled ? "var(--good)" : "rgba(156,163,175,.4)"}`,
           }}>
             <div className="card-title">
-              <strong>Resting Order (Always On)</strong>
+              <strong>Resting Order — Always On</strong>
               <span className={`chip badge ${tradingConfig?.resting?.enabled ? "buy" : "wait"}`}>
                 {tradingConfig?.resting?.enabled ? "● ATIVA" : "○ DESATIVADA"}
               </span>
             </div>
+
             <p className="settings-help" style={{ marginBottom: 10 }}>
-              Quando ativado, o bot mantém sempre 1 ordem LIMIT BUY GTC aberta enquanto não há posição aberta.
-              O candidato é selecionado por prioridade: STRICT → FALLBACK → ANCHOR.
-              A ordem é cancelada/recriada se o regime virar Baixa, sinal virar AVOID, ou após o tempo de refresh.
+              Mantém até <strong>{tradingConfig?.resting?.maxSlots ?? tradingConfig?.resting?.maxRestingOrders ?? 2} slot(s)</strong> de ordens LIMIT BUY GTC abertas enquanto não há posição aberta,
+              capturando pullbacks automaticamente. Quando preenchida, vira posição normal com stop/take configurados.{" "}
+              <strong>Regra de precedência: DIRECT &gt; RESTING &gt; ANCHOR.</strong> Uma ordem direta (sinal BUY forte)
+              cancela a resting do mesmo símbolo antes de entrar, evitando que o bot compita consigo mesmo.
             </p>
 
-            {/* Enable/disable toggle */}
-            <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            {/* Painel de reserva de caixa */}
+            {tradingState && (tradingState.cashUSDT != null || tradingState.reservedUSDT != null) && (
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14, background: "var(--bg2)", borderRadius: 8, padding: "10px 16px", alignItems: "flex-start" }}>
+                <div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2 }}>Caixa total</div>
+                  <div className="mono" style={{ fontSize: 15 }}>${Number(tradingState.cashUSDT ?? 0).toFixed(2)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2 }}>Reservado (resting)</div>
+                  <div className="mono" style={{ fontSize: 15, color: (tradingState.reservedUSDT ?? 0) > 0 ? "var(--warn)" : "var(--muted)" }}>
+                    ${Number(tradingState.reservedUSDT ?? 0).toFixed(2)}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2 }}>Disponível</div>
+                  <div className="mono" style={{ fontSize: 15, color: "var(--good)" }}>
+                    ${Number(tradingState.availableUSDT ?? tradingState.cashUSDT ?? 0).toFixed(2)}
+                  </div>
+                </div>
+                <div style={{ marginLeft: "auto" }}>
+                  <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 2 }}>Slots ativos</div>
+                  <div className="mono" style={{ fontSize: 15 }}>
+                    {tradingState.activeRestingOrders ?? restingIntents.length} / {tradingConfig?.resting?.maxSlots ?? tradingConfig?.resting?.maxRestingOrders ?? 2}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Liga/desliga + precedência */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
               <button
                 className="btn"
                 onClick={() => patchTradingField("resting.enabled", true)}
@@ -758,119 +788,190 @@ python tools/testnet_executor.py`}</pre>
               >
                 Desativar
               </button>
+              <span className="chip" style={{ fontSize: 11, marginLeft: 4 }}>
+                DIRECT &gt; RESTING &gt; ANCHOR
+              </span>
             </div>
 
-            {/* Config params */}
-            <div className="grid cols-3" style={{ marginBottom: 12 }}>
-              <label>
-                Desconto % (discountPct)
-                <input
-                  type="number" step="0.001"
-                  value={Number(tradingConfig?.resting?.discountPct ?? 0.008)}
-                  onChange={(e) => patchTradingField("resting.discountPct", Number(e.target.value))}
-                />
-              </label>
-              <label>
-                Multiplicador ATR (atrMult)
-                <input
-                  type="number" step="0.1"
-                  value={Number(tradingConfig?.resting?.atrMult ?? 0.8)}
-                  onChange={(e) => patchTradingField("resting.atrMult", Number(e.target.value))}
-                />
-              </label>
-              <label>
-                Refresh (minutos)
-                <input
-                  type="number"
-                  value={Number(tradingConfig?.resting?.refreshMinutes ?? 60)}
-                  onChange={(e) => patchTradingField("resting.refreshMinutes", Number(e.target.value))}
-                />
-              </label>
-              <label>
-                Idade máxima (minutos)
-                <input
-                  type="number"
-                  value={Number(tradingConfig?.resting?.maxOrderAgeMinutes ?? 360)}
-                  onChange={(e) => patchTradingField("resting.maxOrderAgeMinutes", Number(e.target.value))}
-                />
-              </label>
-              <label>
-                Tamanho relativo (fallbackSizeMultiplier)
-                <input
-                  type="number" step="0.05"
-                  value={Number(tradingConfig?.resting?.fallbackSizeMultiplier ?? 0.25)}
-                  onChange={(e) => patchTradingField("resting.fallbackSizeMultiplier", Number(e.target.value))}
-                />
-              </label>
-              <label>
-                Âncoras (símbolos p/ fallback)
-                <input
-                  type="text"
-                  value={(tradingConfig?.resting?.anchorSymbolsIfNone || ["BTCUSDT", "ETHUSDT"]).join(",")}
-                  onChange={(e) => patchTradingField("resting.anchorSymbolsIfNone", e.target.value.split(",").map(s => s.trim().toUpperCase()).filter(Boolean))}
-                />
-              </label>
-              <label>
-                Slots simultâneos (maxRestingOrders)
-                <input
-                  type="number" step="1" min="1" max="5"
-                  value={Number(tradingConfig?.resting?.maxRestingOrders ?? 1)}
-                  onChange={(e) => patchTradingField("resting.maxRestingOrders", Number(e.target.value))}
-                />
-              </label>
-              <label>
-                Alocação máx. total % (maxRestingAllocationPct)
-                <input
-                  type="number" step="5" min="5" max="80"
-                  value={Number(tradingConfig?.resting?.maxRestingAllocationPct ?? 30)}
-                  onChange={(e) => patchTradingField("resting.maxRestingAllocationPct", Number(e.target.value))}
-                />
-              </label>
-            </div>
-
-            {/* Current resting intents */}
-            <div className="card-title" style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid rgba(255,255,255,.08)" }}>
-              <strong style={{ fontSize: "var(--fs-sm)" }}>Resting orders ativas</strong>
-              <span className="chip">{restingIntents.length}</span>
-            </div>
-            {restingIntents.length === 0 ? (
-              <p style={{ color: "var(--muted)", fontSize: "var(--fs-sm)", marginTop: 4 }}>Nenhuma resting order pendente no momento.</p>
-            ) : (
-              <div className="table-wrap" style={{ marginTop: 6 }}>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>Símbolo</th>
-                      <th>Perfil</th>
-                      <th>Preço limite</th>
-                      <th>Qtd</th>
-                      <th>Status</th>
-                      <th>Criada em</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {restingIntents.map((ri) => {
-                      const createdTs = ri.createdAt?.toDate ? ri.createdAt.toDate() : (ri.createdAt ? new Date(ri.createdAt) : null);
-                      const ageMin = createdTs ? Math.round((Date.now() - createdTs.getTime()) / 60000) : null;
-                      return (
-                        <tr key={ri.id}>
-                          <td className="asset">{ri.symbol || "—"}</td>
-                          <td>
-                            <span className={`chip badge ${ri.decisionProfile === "STRICT" ? "buy" : ri.decisionProfile === "FALLBACK" ? "wait" : "avoid"}`}>
-                              {ri.decisionProfile || "—"}
-                            </span>
-                          </td>
-                          <td className="mono">{ri.price != null ? ri.price.toFixed(6) : "—"}</td>
-                          <td className="mono">{ri.quantity ?? "—"}</td>
-                          <td><span className="chip badge wait">{ri.status}</span></td>
-                          <td className="mono">{ageMin != null ? `${ageMin}m atrás` : "—"}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+            {/* ── Slots e limites de capital ── */}
+            <div style={{ borderTop: "1px solid rgba(255,255,255,.06)", paddingTop: 12, marginBottom: 12 }}>
+              <div style={{ fontSize: "var(--fs-xs)", color: "var(--muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Slots e limites de capital
               </div>
-            )}
+              <div className="grid cols-3">
+                <label>
+                  Slots simultâneos (maxSlots)
+                  <input
+                    type="number" step="1" min="1" max="5"
+                    value={Number(tradingConfig?.resting?.maxSlots ?? tradingConfig?.resting?.maxRestingOrders ?? 2)}
+                    onChange={(e) => patchTradingField("resting.maxSlots", Number(e.target.value))}
+                  />
+                  <span className="settings-help" style={{ fontSize: 10 }}>
+                    Quantas ordens resting coexistem. Ex: 2 = BTCUSDT e ETHUSDT ao mesmo tempo. Recomendado: 2.
+                  </span>
+                </label>
+                <label>
+                  Teto de alocação total (maxAllocPct)
+                  <input
+                    type="number" step="0.05" min="0.05" max="1"
+                    value={Number(tradingConfig?.resting?.maxAllocPct ?? tradingConfig?.resting?.maxRestingAllocationPct ?? 0.50)}
+                    onChange={(e) => patchTradingField("resting.maxAllocPct", Number(e.target.value))}
+                  />
+                  <span className="settings-help" style={{ fontSize: 10 }}>
+                    Fração do equity máxima reservada em resting somadas. Ex: 0.50 = 50%. Impede superalocação se você tiver vários slots.
+                  </span>
+                </label>
+                <label>
+                  Tamanho por slot (fallbackSizeMultiplier)
+                  <input
+                    type="number" step="0.05" min="0.05" max="1"
+                    value={Number(tradingConfig?.resting?.fallbackSizeMultiplier ?? 0.25)}
+                    onChange={(e) => patchTradingField("resting.fallbackSizeMultiplier", Number(e.target.value))}
+                  />
+                  <span className="settings-help" style={{ fontSize: 10 }}>
+                    Fração do notional normal por trade. Ex: 0.25 = 25%. Mantém cada resting pequena, preservando capital.
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            {/* ── Precificação ── */}
+            <div style={{ borderTop: "1px solid rgba(255,255,255,.06)", paddingTop: 12, marginBottom: 12 }}>
+              <div style={{ fontSize: "var(--fs-xs)", color: "var(--muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Precificação — onde colocar o preço-limite
+              </div>
+              <div className="grid cols-3">
+                <label>
+                  Desconto mínimo (discountPct)
+                  <input
+                    type="number" step="0.001" min="0.001" max="0.05"
+                    value={Number(tradingConfig?.resting?.discountPct ?? 0.008)}
+                    onChange={(e) => patchTradingField("resting.discountPct", Number(e.target.value))}
+                  />
+                  <span className="settings-help" style={{ fontSize: 10 }}>
+                    Desconto mínimo sobre o preço atual. Ex: 0.008 = 0,8%. Preço final: max(ATR×mult, preço×discount).
+                  </span>
+                </label>
+                <label>
+                  Multiplicador ATR (atrMult)
+                  <input
+                    type="number" step="0.1" min="0.1" max="3"
+                    value={Number(tradingConfig?.resting?.atrMult ?? 0.8)}
+                    onChange={(e) => patchTradingField("resting.atrMult", Number(e.target.value))}
+                  />
+                  <span className="settings-help" style={{ fontSize: 10 }}>
+                    Adapta o desconto à volatilidade do ativo. Ex: 0.8 × ATR14. Em ativos mais voláteis o desconto fica maior automaticamente.
+                  </span>
+                </label>
+                <label>
+                  Âncoras de fallback
+                  <input
+                    type="text"
+                    value={(tradingConfig?.resting?.anchorSymbolsIfNone || ["BTCUSDT", "ETHUSDT"]).join(",")}
+                    onChange={(e) => patchTradingField("resting.anchorSymbolsIfNone", e.target.value.split(",").map(s => s.trim().toUpperCase()).filter(Boolean))}
+                  />
+                  <span className="settings-help" style={{ fontSize: 10 }}>
+                    Ativos usados como último recurso quando nenhum candidato da carteira ou Discover passa nos filtros.
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            {/* ── Ciclo de vida ── */}
+            <div style={{ borderTop: "1px solid rgba(255,255,255,.06)", paddingTop: 12, marginBottom: 12 }}>
+              <div style={{ fontSize: "var(--fs-xs)", color: "var(--muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Ciclo de vida — quando renovar ou cancelar
+              </div>
+              <div className="grid cols-3">
+                <label>
+                  Refresh (refreshMinutes)
+                  <input
+                    type="number" min="5"
+                    value={Number(tradingConfig?.resting?.refreshMinutes ?? 60)}
+                    onChange={(e) => patchTradingField("resting.refreshMinutes", Number(e.target.value))}
+                  />
+                  <span className="settings-help" style={{ fontSize: 10 }}>
+                    A cada X min avalia se há candidato melhor; se sim, cancela e recria. Não conta como trade do dia. Recomendado: 60 min.
+                  </span>
+                </label>
+                <label>
+                  Idade máxima (maxOrderAgeMinutes)
+                  <input
+                    type="number" min="30"
+                    value={Number(tradingConfig?.resting?.maxOrderAgeMinutes ?? 360)}
+                    onChange={(e) => patchTradingField("resting.maxOrderAgeMinutes", Number(e.target.value))}
+                  />
+                  <span className="settings-help" style={{ fontSize: 10 }}>
+                    Cancela automaticamente se não preenchida em X min. Evita ordens com preços defasados. Recomendado: 240–360 min.
+                  </span>
+                </label>
+              </div>
+              <p className="settings-help" style={{ marginTop: 6 }}>
+                Regras de cancelamento automático: regime <strong>Baixa</strong>, sinal <strong>AVOID</strong>,
+                ou <strong>entrada DIRECT disparada no mesmo símbolo</strong> (DIRECT tem precedência total).
+                Cancelamentos de resting <strong>não consomem o limite diário de trades</strong>.
+              </p>
+            </div>
+
+            {/* ── Ordens ativas ── */}
+            <div style={{ borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 10 }}>
+              <div className="card-title" style={{ marginBottom: 6 }}>
+                <strong style={{ fontSize: "var(--fs-sm)" }}>Resting orders ativas</strong>
+                <span className="chip">
+                  {restingIntents.length} / {tradingConfig?.resting?.maxSlots ?? tradingConfig?.resting?.maxRestingOrders ?? 2} slots
+                </span>
+              </div>
+              {restingIntents.length === 0 ? (
+                <p style={{ color: "var(--muted)", fontSize: "var(--fs-sm)", marginTop: 4 }}>
+                  {tradingConfig?.resting?.enabled
+                    ? "Nenhuma resting order pendente. O bot abrirá na próxima execução (trade-run a cada 5 min)."
+                    : "Resting desativado — use o botão Ativar acima para ligar o modo Always On."}
+                </p>
+              ) : (
+                <div className="table-wrap" style={{ marginTop: 6 }}>
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>Símbolo</th>
+                        <th>Perfil</th>
+                        <th>Universo</th>
+                        <th>Preço limite</th>
+                        <th>Reservado</th>
+                        <th>Status</th>
+                        <th>Criada</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {restingIntents.map((ri) => {
+                        const createdTs = ri.createdAt?.toDate ? ri.createdAt.toDate() : (ri.createdAt ? new Date(ri.createdAt) : null);
+                        const ageMin = createdTs ? Math.round((Date.now() - createdTs.getTime()) / 60000) : null;
+                        return (
+                          <tr key={ri.id}>
+                            <td className="asset">{ri.symbol || "—"}</td>
+                            <td>
+                              <span className={`chip badge ${ri.decisionProfile === "STRICT" ? "buy" : ri.decisionProfile === "FALLBACK" ? "wait" : "avoid"}`}>
+                                {ri.decisionProfile || "—"}
+                              </span>
+                            </td>
+                            <td>
+                              <span className="chip" style={{ fontSize: 10 }}>{ri.sourceUniverse || "—"}</span>
+                            </td>
+                            <td className="mono">{ri.price != null ? ri.price.toFixed(6) : "—"}</td>
+                            <td className="mono">
+                              {ri.reservedNotionalUSDT != null
+                                ? `$${Number(ri.reservedNotionalUSDT).toFixed(2)}`
+                                : (ri.price && ri.quantity ? `$${(ri.price * ri.quantity).toFixed(2)}` : "—")}
+                            </td>
+                            <td><span className="chip badge wait">{ri.status}</span></td>
+                            <td className="mono">{ageMin != null ? `${ageMin}m` : "—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
 
           {tradingMessage ? <div className="chip" style={{ marginTop: 12 }}>{tradingMessage}</div> : null}

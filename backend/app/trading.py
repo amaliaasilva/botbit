@@ -483,6 +483,39 @@ def _close_position_paper(
     bq.insert_trade_orders([row])
 
 
+def _cancel_resting_for_symbol(
+    fs: "FirestoreNotificationStorage",
+    symbol: str,
+    mode: str,
+    api_key: str,
+    api_secret: str,
+    errors: list,
+) -> int:
+    """Cancel all active resting orders for `symbol` — call before opening a DIRECT position.
+
+    Returns the number of resting orders cancelled.
+    """
+    cancelled = 0
+    active: list[dict] = []
+    for st in ("RESTING_PENDING", "RESTING_SUBMITTED"):
+        active.extend(fs.list_trade_intents(status=st, limit_size=30))
+    for intent in active:
+        if str(intent.get("symbol", "")).upper() != symbol.upper():
+            continue
+        intent_id = intent.get("intentId", "")
+        order_id_val = _safe_int(intent.get("orderId"), 0)
+        if mode in ("LIVE", "TESTNET") and order_id_val:
+            try:
+                client = BinanceTradeClient(api_key=api_key, api_secret=api_secret, mode=mode)
+                client.cancel_order(symbol=symbol, order_id=order_id_val)
+            except Exception as exc:
+                errors.append({"symbol": symbol, "error": f"RESTING_PRE_DIRECT_CANCEL_FAIL: {exc}"})
+        if intent_id:
+            fs.update_trade_intent(intent_id, {"status": "CANCELLED", "cancelReason": "DIRECT_TAKES_PRECEDENCE"})
+            cancelled += 1
+    return cancelled
+
+
 def _live_gate_ok(config: dict[str, Any]) -> tuple[bool, str]:
     """Double-confirmation gate for LIVE trading.
 
@@ -551,8 +584,11 @@ def _ensure_resting_order(
     atr_mult = _safe_float(resting_cfg.get("atrMult"), 0.8)
     refresh_minutes = _safe_float(resting_cfg.get("refreshMinutes"), 60)
     max_age_minutes = _safe_float(resting_cfg.get("maxOrderAgeMinutes"), 360)
-    max_slots = int(_safe_float(resting_cfg.get("maxSlots"), 3))
-    max_alloc_pct = _safe_float(resting_cfg.get("maxAllocPct"), 0.50)
+    # Support both canonical (maxSlots) and legacy (maxRestingOrders) field names
+    _raw_slots = resting_cfg.get("maxSlots") if "maxSlots" in resting_cfg else resting_cfg.get("maxRestingOrders")
+    max_slots = max(1, int(_safe_float(_raw_slots, 2)))
+    _raw_alloc = resting_cfg.get("maxAllocPct") if "maxAllocPct" in resting_cfg else resting_cfg.get("maxRestingAllocationPct")
+    max_alloc_pct = _safe_float(_raw_alloc, 0.50)
     anchor_symbols = resting_cfg.get("anchorSymbolsIfNone") or ["BTCUSDT", "ETHUSDT"]
     now = _now()
 
@@ -764,7 +800,13 @@ def _ensure_resting_order(
     stop_i = max(0.0, limit_price - _safe_float(exit_cfg.get("stopAtrMult"), 1.5) * atr_val)
     take_i = max(limit_price, limit_price + _safe_float(exit_cfg.get("takeAtrMult"), 2.5) * atr_val)
 
+    # Deterministic ID per symbol — ensures idempotency within a refresh window
     resting_intent_id = _dedupe_order_id(run_id, sym, "RESTING_BUY", mode)
+    reserved_notional = round(qty * limit_price, 6)
+    source_universe = (
+        "ANCHOR" if decision_profile == "ANCHOR"
+        else universe_meta.get("mode", "DISCOVER")
+    )
     intent_payload = {
         "intentId": resting_intent_id,
         "status": "RESTING_PENDING",
@@ -773,18 +815,19 @@ def _ensure_resting_order(
         "symbol": sym,
         "side": "BUY",
         "orderType": "LIMIT",
-        "intentType": "RESTING_LIMIT",
+        "intentType": "RESTING",
         "decisionProfile": decision_profile,
+        "sourceUniverse": source_universe,
+        "sourceUniverseSize": universe_meta.get("size", 0),
         "quantity": qty,
         "price": limit_price,
+        "reservedNotionalUSDT": reserved_notional,
         "stopPrice": _round_step(stop_i, tick_size) if tick_size > 0 else round(stop_i, 8),
         "takePrice": _round_step(take_i, tick_size) if tick_size > 0 else round(take_i, 8),
         "mode": mode,
         "score": selected_candidate.get("score"),
         "regime": selected_candidate.get("regime"),
         "signal": selected_candidate.get("signal"),
-        "sourceUniverse": universe_meta.get("mode", "UNKNOWN"),
-        "sourceUniverseSize": universe_meta.get("size", 0),
     }
 
     fs.client.collection("trade_intents").document(resting_intent_id).set(intent_payload)
@@ -1452,6 +1495,9 @@ def run_trade_pipeline() -> dict[str, Any]:
                         skipped += 1
                     continue
 
+                # DIRECT > RESTING: cancel any resting order for this symbol before opening
+                _cancel_resting_for_symbol(fs, symbol, mode, api_key, api_secret, errors)
+
                 # BUY — write intent BEFORE placing order (audit + idempotency)
                 buy_intent_id = _dedupe_order_id(run_id, symbol, "BUY", mode)
                 atr_i = max(_safe_float(candidate.get("atr"), 0), price * 0.003)
@@ -1462,6 +1508,7 @@ def run_trade_pipeline() -> dict[str, Any]:
                     "symbol": symbol,
                     "side": "BUY",
                     "orderType": "LIMIT",
+                    "intentType": "DIRECT",
                     "quantity": qty,
                     "price": price,
                     "stopPrice": stop_i,
@@ -1651,6 +1698,19 @@ def run_trade_pipeline() -> dict[str, Any]:
         except Exception as _resting_exc:
             errors.append({"symbol": "_resting", "error": str(_resting_exc)})
 
+        # Compute reserved capital from all active resting orders (for UI display)
+        _active_resting: list[dict] = []
+        for _rst in ("RESTING_PENDING", "RESTING_SUBMITTED"):
+            _active_resting.extend(fs.list_trade_intents(status=_rst, limit_size=30))
+        reserved_usdt = sum(
+            _safe_float(
+                i.get("reservedNotionalUSDT")
+                or _safe_float(i.get("price"), 0) * _safe_float(i.get("quantity"), 0),
+                0,
+            )
+            for i in _active_resting
+        )
+
         open_positions = fs.list_trading_positions(status="OPEN", limit_size=300)
         position_rows = []
         exposure = 0.0
@@ -1686,6 +1746,7 @@ def run_trade_pipeline() -> dict[str, Any]:
             _mark_fail_safe(fs, alerts, owner_uid, "DAILY_LOSS_CUT")
 
         summary = f"executed={executed} skipped={skipped} candidates={len(candidates)} mode={mode}"
+        available_usdt = round(max(0.0, state_cash - reserved_usdt), 6)
         fs.upsert_trading_state(
             {
                 "enabled": bool(config.get("enabled", False)),
@@ -1697,7 +1758,10 @@ def run_trade_pipeline() -> dict[str, Any]:
                 "cashUSDT": round(state_cash, 6),
                 "equityUSDT": round(equity, 6),
                 "exposureUSDT": round(exposure, 6),
+                "reservedUSDT": round(reserved_usdt, 6),
+                "availableUSDT": available_usdt,
                 "dailyPnlUSDT": round(daily_pnl, 6),
+                "activeRestingOrders": len(_active_resting),
                 "candidates": len(candidates),
                 "executed": executed,
                 "decisionUniverseMode": universe_meta.get("mode", "UNKNOWN"),
