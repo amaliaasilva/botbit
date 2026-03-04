@@ -463,12 +463,13 @@ def run_score_pipeline() -> dict[str, Any]:
             storage.insert_feature_rows(rows[-1:])
             features_inserted += 1
 
+            # Usa a linha recém calculada diretamente — não relê do BigQuery para evitar
+            # problemas de consistência eventual do streaming insert (BQ pode não
+            # retornar a linha recém inserida imediatamente).
+            latest_row = rows[-1]
             previous = storage.get_previous_feature(asset_type, symbol)
-            latest = storage.get_latest_feature(asset_type, symbol)
-            if not latest:
-                raise RuntimeError("latest_feature_missing")
 
-            score, regime, signal, status = _normalize_state(latest)
+            score, regime, signal, status = _normalize_state(latest_row)
             close_value = _safe_float(features.iloc[-1].get("close")) if not features.empty else 0.0
 
             if fs_storage:
@@ -479,23 +480,23 @@ def run_score_pipeline() -> dict[str, Any]:
                         "score": score,
                         "regime": regime,
                         "signal": signal,
-                        "rsi14": _safe_float(latest.get("rsi14")),
-                        "ema50": _safe_float(latest.get("ema50")),
-                        "ema200": _safe_float(latest.get("ema200")),
-                        "atr14": _safe_float(latest.get("atr14")),
+                        "rsi14": _safe_float(latest_row.get("rsi14")),
+                        "ema50": _safe_float(latest_row.get("ema50")),
+                        "ema200": _safe_float(latest_row.get("ema200")),
+                        "atr14": _safe_float(latest_row.get("atr14")),
                         "price_close": close_value,
                         "close": close_value,
-                        "stop_price": latest.get("stop_price"),
-                        "ts": latest.get("ts"),
+                        "stop_price": latest_row.get("stop_price"),
+                        "ts": latest_row.get("ts"),
                         "status": status,
-                        "explanation": latest.get("explanation") or "",
+                        "explanation": latest_row.get("explanation") or "",
                         "source": "binance",
                     },
                 )
 
             # BTC: alerta a partir de score 70 | outros ativos: score ≥ 80 (evita spam)
             alert_threshold = 70 if symbol == settings.btc_symbol else 80
-            latest_for_alert = {**latest, "score": score, "regime": regime, "signal": signal}
+            latest_for_alert = {**latest_row, "score": score, "regime": regime, "signal": signal}
             if _send_alert_if_needed(
                 storage,
                 fs_storage,
@@ -522,7 +523,7 @@ def run_score_pipeline() -> dict[str, Any]:
                     near_id = hashlib.sha256(f"near_entry|{symbol}|{near_bucket}".encode()).hexdigest()
                     if not storage.has_alert(near_id):
                         storage.insert_alert(near_id, symbol, "NEAR_ENTRY", datetime.now(timezone.utc))
-                        rsi_val = float(latest.get("rsi14") or 0)
+                        rsi_val = float(latest_row.get("rsi14") or 0)
                         fs_storage.add_notification(
                             alert_owner_uid,
                             near_id,
