@@ -131,13 +131,12 @@ function WhyTooltip({ item, quote }) {
 }
 
 /* ── MercadoTab ─────────────────────────────────────────── */
-function MercadoTab() {
+function MercadoTab({ uid = "", mode = "PAPER" }) {
   const [ranking, setRanking] = useState([]);
   const [loading, setLoading] = useState(true);
   const [quotesMap, setQuotesMap] = useState({});
   const [detailSymbol, setDetailSymbol] = useState("");
   const [selectedSymbol, setSelectedSymbol] = useState("BTCUSDT");
-  const [tradingState, setTradingState] = useState(null);
   const [discoverMap, setDiscoverMap] = useState({});
   const [detailDiscover, setDetailDiscover] = useState(null);
   const [scoreUniverse, setScoreUniverse] = useState(null);
@@ -179,10 +178,6 @@ function MercadoTab() {
   }, [ranking]);
 
   useEffect(() => {
-    return subscribeTradingState((s) => setTradingState(s));
-  }, []);
-
-  useEffect(() => {
     const symbols = ranking.slice(0, 30).map((r) => r.symbol).filter(Boolean);
     if (!symbols.length) return () => {};
     return subscribeQuotes(symbols, (rows) => {
@@ -204,7 +199,7 @@ function MercadoTab() {
   }, {});
   const dominantRegime = Object.entries(regimeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "neutro";
   const avgScore = ranking.length ? Math.round(ranking.reduce((s, r) => s + Number(r.score || 0), 0) / ranking.length) : 0;
-  const mode = String(tradingState?.mode || "PAPER").toUpperCase();
+  const tradingMode = String(mode || "PAPER").toUpperCase();
 
   return (
     <>
@@ -395,6 +390,8 @@ function MercadoTab() {
         quote={quotesMap[detailSymbol] || null}
         market={ranking.find((r) => r.symbol === detailSymbol) || null}
         discover={detailDiscover}
+        uid={uid}
+        mode={tradingMode}
         onClose={() => setDetailSymbol("")}
       />
     </>
@@ -402,7 +399,7 @@ function MercadoTab() {
 }
 
 /* ── WatchlistTab ────────────────────────────────────────── */
-function WatchlistTab({ uid }) {
+function WatchlistTab({ uid, mode = "PAPER" }) {
   const [items, setItems] = useState([]);
   const [rows, setRows] = useState([]);
   const [discoverRows, setDiscoverRows] = useState([]);
@@ -626,15 +623,15 @@ function WatchlistTab({ uid }) {
         symbol={detailSymbol}
         quote={quotesMap[detailSymbol] || null}
         market={rows.find((r) => r.symbol === detailSymbol) || null}
-        discover={discoverRows.find((r) => r.symbol === detailSymbol) || null}
-        onClose={() => setDetailSymbol("")}
+        discover={discoverRows.find((r) => r.symbol === detailSymbol) || null}        uid={uid}
+        mode={mode}        onClose={() => setDetailSymbol("")}
       />
     </>
   );
 }
 
 /* ── DiscoverTab ─────────────────────────────────────────── */
-function DiscoverTab({ uid }) {
+function DiscoverTab({ uid, mode = "PAPER" }) {
   const [items, setItems] = useState([]);
   const [quotesMap, setQuotesMap] = useState({});
   const [tagFilter, setTagFilter] = useState("ALL");
@@ -834,6 +831,8 @@ function DiscoverTab({ uid }) {
           };
         })()}
         discover={items.find((r) => r.symbol === detailSymbol) || null}
+        uid={uid}
+        mode={mode}
         onClose={() => setDetailSymbol("")}
       />
     </>
@@ -845,7 +844,10 @@ export default function DashboardPage() {
   const [uid, setUid] = useState("");
   const [email, setEmail] = useState("");
   const [activeTab, setActiveTab] = useState("mercado");
+  const [mode, setMode] = useState("PAPER");
   const router = useRouter();
+
+  useEffect(() => { return subscribeTradingState((s) => setMode(String(s?.mode || "PAPER").toUpperCase())); }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -891,9 +893,9 @@ export default function DashboardPage() {
         ))}
       </div>
 
-      {activeTab === "mercado" && <MercadoTab />}
-      {activeTab === "watchlist" && <WatchlistTab uid={uid} />}
-      {activeTab === "discover" && <DiscoverTab uid={uid} />}
+      {activeTab === "mercado" && <MercadoTab uid={uid} mode={mode} />}
+      {activeTab === "watchlist" && <WatchlistTab uid={uid} mode={mode} />}
+      {activeTab === "discover" && <DiscoverTab uid={uid} mode={mode} />}
     </AppShell>
   );
 }

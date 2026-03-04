@@ -128,6 +128,18 @@ export async function fetchLiveGateStatus() {
   return getJson("/api/trading/live-gate-status", true);
 }
 
+export async function placeManualOrder({ symbol, side, quoteQty = 50, confirm = false }) {
+  return postJson("/api/order", { symbol, side, quoteQty, confirm }, true);
+}
+
 export async function triggerAlertTest() {
   return postJson("/api/alerts/test", {}, true);
+}
+
+export async function triggerRunDiscover() {
+  return postJson("/api/admin/run-discover", {}, true);
+}
+
+export async function triggerRunScore() {
+  return postJson("/api/admin/run-score", {}, true);
 }

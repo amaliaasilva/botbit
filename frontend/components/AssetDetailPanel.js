@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import IAExplainPanel from "./ui/IAExplainPanel";
 import { fetchExplain } from "../lib/backend";
+import { placeManualOrder } from "../lib/backend";
 
 function metricValue(value, digits = 2) {
   if (value == null || Number.isNaN(Number(value))) return "—";
@@ -188,9 +189,31 @@ function buildExplanLevels({ symbol, market, discover, quote }) {
   return { leigo, intermediario, tecnico, significado, riscoPrincipal, condicaoMudar };
 }
 
-export default function AssetDetailPanel({ open, symbol, quote, market, discover, onClose }) {
+export default function AssetDetailPanel({ open, symbol, quote, market, discover, uid = "", mode = "PAPER", onClose }) {
   const [aiExplain, setAiExplain] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
+  const [orderLoading, setOrderLoading] = useState(false);
+  const [orderMsg, setOrderMsg] = useState("");
+  const [orderErr, setOrderErr] = useState("");
+  const [confirmLive, setConfirmLive] = useState(false);
+
+  async function handleOrder(side) {
+    if (!uid) { setOrderErr("Você precisa estar autenticado para operar."); return; }
+    if (mode === "LIVE" && !confirmLive) { setConfirmLive(true); return; }
+    setOrderLoading(true); setOrderMsg(""); setOrderErr("");
+    try {
+      const res = await placeManualOrder({
+        symbol, side,
+        quoteQty: side === "BUY" ? 50 : undefined,
+        confirm: mode === "LIVE",
+      });
+      setOrderMsg(`✅ ${side === "BUY" ? "Compra" : "Venda"} executada em ${mode} — @ ${Number(res.executedPrice || 0).toFixed(6)}`);
+    } catch (e) {
+      setOrderErr(e?.message || "Erro ao enviar ordem. Verifique o console.");
+    } finally {
+      setOrderLoading(false); setConfirmLive(false);
+    }
+  }
 
   /* Fetch AI explanation when panel opens */
   useEffect(() => {
@@ -352,14 +375,25 @@ export default function AssetDetailPanel({ open, symbol, quote, market, discover
                     <span className="mono" style={{ color: "var(--good)" }}>{metricValue(targetPrice, price >= 1 ? 2 : 6)}</span>
                   </div>
                 )}
-                <button
-                  className="btn btn-primary"
-                  style={{ marginTop: 10, width: "100%", opacity: 0.5, cursor: "not-allowed" }}
-                  disabled
-                  title="Em breve — requer ativação de ordens no backend"
-                >
-                  🟢 Executar Compra (em breve)
-                </button>
+                {orderMsg && <div style={{ color: "var(--good)", margin: "8px 0", fontWeight: 600 }}>{orderMsg}</div>}
+                {orderErr && <div style={{ color: "var(--danger)", margin: "8px 0" }}>{orderErr}</div>}
+                {confirmLive && (
+                  <div style={{ background: "#7f1d1d", borderRadius: 6, padding: "8px 10px", marginTop: 8, fontSize: "var(--fs-xs)" }}>
+                    ⚠️ Confirmação LIVE — dinheiro real!
+                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                      <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => handleOrder("BUY")} disabled={orderLoading}>
+                        {orderLoading ? "⏳..." : "🟢 Confirmar Compra LIVE"}
+                      </button>
+                      <button className="btn" onClick={() => setConfirmLive(false)}>Cancelar</button>
+                    </div>
+                  </div>
+                )}
+                {!confirmLive && (
+                  <button className="btn btn-primary" style={{ marginTop: 10, width: "100%" }}
+                    onClick={() => handleOrder("BUY")} disabled={orderLoading}>
+                    {orderLoading ? "⏳ Enviando..." : `🟢 Comprar 50 USDT — ${mode}`}
+                  </button>
+                )}
               </div>
             )}
             {/* Sugestão de saída */}
@@ -376,14 +410,25 @@ export default function AssetDetailPanel({ open, symbol, quote, market, discover
                     <span className="mono" style={{ color: "var(--danger)" }}>{metricValue(stopPrice, price >= 1 ? 2 : 6)}</span>
                   </div>
                 )}
-                <button
-                  className="btn"
-                  style={{ marginTop: 10, width: "100%", background: "var(--danger)", opacity: 0.5, cursor: "not-allowed" }}
-                  disabled
-                  title="Em breve — requer ativação de ordens no backend"
-                >
-                  🔴 Executar Venda (em breve)
-                </button>
+                {orderMsg && <div style={{ color: "var(--good)", margin: "8px 0", fontWeight: 600 }}>{orderMsg}</div>}
+                {orderErr && <div style={{ color: "var(--danger)", margin: "8px 0" }}>{orderErr}</div>}
+                {confirmLive && (
+                  <div style={{ background: "#7f1d1d", borderRadius: 6, padding: "8px 10px", marginTop: 8, fontSize: "var(--fs-xs)" }}>
+                    ⚠️ Confirmação LIVE — fecha posição real!
+                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                      <button className="btn" style={{ flex: 1, background: "var(--danger)" }} onClick={() => handleOrder("SELL")} disabled={orderLoading}>
+                        {orderLoading ? "⏳..." : "🔴 Confirmar Venda LIVE"}
+                      </button>
+                      <button className="btn" onClick={() => setConfirmLive(false)}>Cancelar</button>
+                    </div>
+                  </div>
+                )}
+                {!confirmLive && (
+                  <button className="btn" style={{ marginTop: 10, width: "100%", background: "var(--danger)", color: "#fff" }}
+                    onClick={() => handleOrder("SELL")} disabled={orderLoading}>
+                    {orderLoading ? "⏳ Enviando..." : `🔴 Vender posição — ${mode}`}
+                  </button>
+                )}
               </div>
             )}
           </div>

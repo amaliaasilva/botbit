@@ -158,6 +158,24 @@ def api_discover(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
     return {"items": get_discover_latest(50)}
 
 
+@app.post("/api/admin/run-discover")
+def api_admin_run_discover(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
+    """Disparo manual do pipeline de Discover (requer auth Firebase)."""
+    started_at = datetime.utcnow().isoformat()
+    result = run_discover_pipeline()
+    log_event(logger, "admin_run_discover", uid=auth.uid, started_at=started_at, **result)
+    return {"ok": True, "startedAt": started_at, **result}
+
+
+@app.post("/api/admin/run-score")
+def api_admin_run_score(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
+    """Disparo manual do pipeline de Score/Mercado (requer auth Firebase)."""
+    started_at = datetime.utcnow().isoformat()
+    result = run_score_pipeline()
+    log_event(logger, "admin_run_score", uid=auth.uid, started_at=started_at, **result)
+    return {"ok": True, "startedAt": started_at, **result}
+
+
 @app.post("/cron/trade-run")
 def cron_trade_run(_: None = Depends(require_cron)) -> dict[str, Any]:
     started_at = datetime.utcnow().isoformat()

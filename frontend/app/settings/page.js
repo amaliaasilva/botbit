@@ -7,7 +7,7 @@ import { getUserSettings, updateUserSettings } from "../../lib/firestore";
 import { useRouter } from "next/navigation";
 import AppShell from "../../components/AppShell";
 import { emergencyStopTrading, subscribeTradingConfig, subscribeTradingState, updateTradingConfig, subscribeExecutorStatus, subscribePendingIntents } from "../../lib/firestore";
-import { fetchBinanceValidate, fetchLiveGateStatus, triggerAlertTest } from "../../lib/backend";
+import { fetchBinanceValidate, fetchLiveGateStatus, triggerAlertTest, triggerRunDiscover, triggerRunScore } from "../../lib/backend";
 
 const TABS = [
   { id: "profile", label: "Perfil", hint: "Notificações e preferências" },
@@ -58,6 +58,10 @@ export default function SettingsPage() {
   const [gateLoading, setGateLoading] = useState(false);
   const [alertTestResult, setAlertTestResult] = useState(null);
   const [alertTestLoading, setAlertTestLoading] = useState(false);
+  const [discoverRunning, setDiscoverRunning] = useState(false);
+  const [discoverResult, setDiscoverResult] = useState(null);
+  const [scoreRunning, setScoreRunning] = useState(false);
+  const [scoreResult, setScoreResult] = useState(null);
 
   const [costData, setCostData] = useState(null);
   const [costLoading, setCostLoading] = useState(false);
@@ -149,6 +153,32 @@ export default function SettingsPage() {
     await emergencyStopTrading();
     setTradingMessage("Emergency Stop aplicado com sucesso");
     setTimeout(() => setTradingMessage(""), 2000);
+  }
+
+  async function runDiscover() {
+    setDiscoverRunning(true);
+    setDiscoverResult(null);
+    try {
+      const res = await triggerRunDiscover();
+      setDiscoverResult({ ok: true, msg: `Discover atualizado — ${res.updated ?? res.total ?? ""} ativos processados.` });
+    } catch (e) {
+      setDiscoverResult({ ok: false, msg: e.message });
+    } finally {
+      setDiscoverRunning(false);
+    }
+  }
+
+  async function runScore() {
+    setScoreRunning(true);
+    setScoreResult(null);
+    try {
+      const res = await triggerRunScore();
+      setScoreResult({ ok: true, msg: `Score atualizado — ${res.updated ?? res.scored ?? res.total ?? ""} ativos pontuados.` });
+    } catch (e) {
+      setScoreResult({ ok: false, msg: e.message });
+    } finally {
+      setScoreRunning(false);
+    }
   }
 
   async function validateBinance() {
@@ -364,6 +394,47 @@ export default function SettingsPage() {
                 <button className="btn btn-danger" onClick={triggerEmergencyStop}>Emergency Stop</button>
               </div>
               <p className="settings-help">Emergency Stop desliga operações imediatamente e deve ser usado em situação de risco.</p>
+            </div>
+
+            <div className="card">
+              <div className="card-title"><strong>Atualização manual</strong><span className="chip">Operação</span></div>
+              <p className="settings-help">Força a execução imediata dos pipelines sem esperar o próximo ciclo automático.</p>
+              <div className="settings-actions-wrap" style={{ flexWrap: "wrap", gap: 10 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <button
+                    className="btn"
+                    onClick={runDiscover}
+                    disabled={discoverRunning}
+                    style={{ minWidth: 180 }}
+                  >
+                    {discoverRunning ? "⏳ Executando…" : "⚡ Forçar Discover"}
+                  </button>
+                  {discoverResult && (
+                    <span style={{ fontSize: 12, color: discoverResult.ok ? "var(--good)" : "var(--danger)" }}>
+                      {discoverResult.ok ? "✓ " : "✗ "}{discoverResult.msg}
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <button
+                    className="btn"
+                    onClick={runScore}
+                    disabled={scoreRunning}
+                    style={{ minWidth: 180 }}
+                  >
+                    {scoreRunning ? "⏳ Executando…" : "⚡ Forçar Score/Mercado"}
+                  </button>
+                  {scoreResult && (
+                    <span style={{ fontSize: 12, color: scoreResult.ok ? "var(--good)" : "var(--danger)" }}>
+                      {scoreResult.ok ? "✓ " : "✗ "}{scoreResult.msg}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <p className="settings-help" style={{ marginTop: 8 }}>
+                Discover: varre novos ativos candidatos. Score/Mercado: recalcula pontuação e atualiza sinais.
+                Cada execução pode levar 30–90 segundos.
+              </p>
             </div>
           </div>
 

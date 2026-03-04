@@ -624,11 +624,13 @@ def execute_manual_order(
     client = BinanceTradeClient(api_key, api_secret, mode=mode)
     try:
         if side == "BUY":
-            resp = client.place_order(
-                symbol, "BUY", "MARKET",
-                quantity=0,  # placeholder, overridden by quoteOrderQty
-                quoteOrderQty=round(float(quote_qty), 2),
-            )
+            # Use quoteOrderQty (USDT amount) — Binance MARKET BUY without quantity
+            resp = client._signed_request("POST", "/api/v3/order", params={
+                "symbol": symbol,
+                "side": "BUY",
+                "type": "MARKET",
+                "quoteOrderQty": round(float(quote_qty), 2),
+            })
         else:
             existing = fs.list_trading_positions(status="OPEN", limit_size=200)
             pos = next((p for p in existing if str(p.get("symbol", "")).upper() == symbol), None)
