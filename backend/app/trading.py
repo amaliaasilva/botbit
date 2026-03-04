@@ -157,13 +157,56 @@ def _notify(
             pass
 
 
-def _load_universe(config: dict[str, Any], discover_rows: list[dict[str, Any]]) -> tuple[list[str], str, int]:
-    """Returns (symbols, universe_mode, universe_size)."""
-    universe_mode = str(config.get("symbolsUniverse") or "DISCOVER_TOP50").upper()
+def _load_universe(
+    config: dict[str, Any],
+    discover_rows: list[dict[str, Any]],
+    fs: FirestoreNotificationStorage | None = None,
+    owner_uid: str = "",
+) -> tuple[list[str], str, int]:
+    """Returns (symbols, universe_mode, universe_size).
+
+    Modes (config.symbolsUniverse):
+      WATCHLIST_USER  — symbols from users/{ownerUid}/watchlist
+      DISCOVER_TOPN   — top-N from public/discover_top/items
+      SCORE_UNIVERSE  — symbols from config/score_universe_current
+      FIXED_LIST      — fixed list from config.fixedSymbols
+      DISCOVER_TOP50  — legacy: all discover_rows (fallback)
+    """
+    universe_mode = str(config.get("symbolsUniverse") or "SCORE_UNIVERSE").upper()
+
+    if universe_mode == "WATCHLIST_USER" and fs and owner_uid:
+        try:
+            syms = fs.list_user_watchlist(owner_uid)
+            if syms:
+                return syms, "WATCHLIST_USER", len(syms)
+        except Exception:
+            pass
+
+    if universe_mode == "SCORE_UNIVERSE" and fs:
+        try:
+            universe_doc = fs.get_score_universe()
+            if universe_doc:
+                syms = [str(s).upper() for s in (universe_doc.get("symbols") or []) if str(s).upper().endswith("USDT")]
+                if syms:
+                    return syms, "SCORE_UNIVERSE", len(syms)
+        except Exception:
+            pass
+
+    if universe_mode == "DISCOVER_TOPN" and fs:
+        try:
+            rows = fs.list_discover_top_public(limit_size=50)
+            syms = [str(r.get("symbol") or "").upper() for r in rows if r.get("symbol")]
+            if syms:
+                return syms, "DISCOVER_TOPN", len(syms)
+        except Exception:
+            pass
+
     if universe_mode == "FIXED_LIST":
         fixed = config.get("fixedSymbols") or []
         syms = [str(item).upper() for item in fixed if str(item).upper().endswith("USDT")]
         return syms, "FIXED_LIST", len(syms)
+
+    # Fallback: legacy discover_rows
     syms = [str(row.get("symbol") or "").upper() for row in discover_rows if row.get("symbol")]
     return syms, "DISCOVER_TOP50", len(syms)
 
@@ -173,6 +216,9 @@ def _entry_filter(
     discover_rows: list[dict[str, Any]],
     market_rows: list[dict[str, Any]],
     quotes_rows: list[dict[str, Any]],
+    *,
+    fs: FirestoreNotificationStorage | None = None,
+    owner_uid: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Returns (candidates, universe_meta).
 
@@ -180,7 +226,7 @@ def _entry_filter(
     """
     entry = config.get("entry") or {}
     guards = config.get("guards") or {}
-    universe_syms, universe_mode, universe_size = _load_universe(config, discover_rows)
+    universe_syms, universe_mode, universe_size = _load_universe(config, discover_rows, fs, owner_uid)
     universe = set(universe_syms)
     min_score = _safe_float(entry.get("minScore"), 70)
     min_potential = _safe_float(entry.get("minPotentialScore"), 75)
@@ -327,7 +373,6 @@ def _paper_open_position(
     cash = _safe_float(state.get("cashUSDT"), equity)
 
     max_notional_pct = _safe_float(config.get("maxNotionalPerTradePct"), 35) / 100.0
-    risk_pct = _safe_float(config.get("riskPerTradePct"), 0.75) / 100.0
     min_notional = _safe_float(config.get("minNotionalUSDT"), 10)
 
     notional = min(equity * max_notional_pct, cash * 0.98)
@@ -650,12 +695,11 @@ def run_trade_pipeline() -> dict[str, Any]:
                     "error": str(exc),
                 }
 
-        candidates, universe_meta = _entry_filter(config, discover_rows, market_rows, quotes_rows)
+        candidates, universe_meta = _entry_filter(config, discover_rows, market_rows, quotes_rows, fs=fs, owner_uid=owner_uid)
         open_positions = fs.list_trading_positions(status="OPEN", limit_size=200)
         quote_map = {str(row.get("symbol") or "").upper(): row for row in quotes_rows}
         market_map = {str(row.get("symbol") or "").upper(): row for row in market_rows}
         exit_cfg = config.get("exit") or {}
-        entry_cfg = config.get("entry") or {}
 
         executed = 0
         skipped = 0

@@ -9,14 +9,14 @@ import requests
 
 from app.auth import AuthContext, require_auth
 from app.config import get_logger, get_secret, get_settings, log_event
-from app.cron import _build_rows_btc, run_pipeline, run_quotes_pipeline, run_score_pipeline
+from app.cron import _build_rows_btc, run_quotes_pipeline, run_score_pipeline
 from app.discover import get_discover_latest, run_discover_pipeline
 from app.indicators import enrich_btc_features
 from app.sources.binance import BinanceClient
 from app.sources.binance_trade import BinanceTradeClient
 from app.storage.bigquery_client import BigQueryStorage
 from app.storage.firestore_client import FirestoreNotificationStorage
-from app.trading import run_trade_pipeline, _live_gate_ok, _parse_ts, _now
+from app.trading import run_trade_pipeline, _live_gate_ok
 
 app = FastAPI(title="Market AI Scoring", version="1.0.0")
 
