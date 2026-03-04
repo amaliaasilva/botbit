@@ -525,7 +525,7 @@ def _get_egress_ip() -> str:
 
 
 @app.post("/internal/binance/testnet/ping")
-def internal_testnet_ping() -> dict[str, Any]:
+def internal_testnet_ping(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
     """Diagnóstico: chama GET /api/v3/time no TESTNET sem credenciais.
     Prova que o Cloud Run alcança testnet.binance.vision.
     """
@@ -564,7 +564,7 @@ def internal_testnet_ping() -> dict[str, Any]:
 
 
 @app.post("/internal/binance/testnet/account")
-def internal_testnet_account() -> dict[str, Any]:
+def internal_testnet_account(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
     """Diagnóstico: chama GET /api/v3/account assinado com as TESTNET keys.
     Prova que as credenciais TESTNET funcionam a partir deste Cloud Run.
     Nunca vaza valores de secret na resposta.

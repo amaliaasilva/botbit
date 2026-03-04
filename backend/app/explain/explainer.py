@@ -13,45 +13,133 @@ def build_explanation(event_type: str, symbol: str, facts: dict[str, Any] | None
     signal = str(data.get("signal") or "WAIT")
     score = int(float(data.get("score") or 0))
 
-    one_liner = f"{event_type}: {symbol} com regime {regime}, sinal {signal} e score {score}."
+    # Enrich with real indicator values when available
+    rsi = float(data.get("rsi14") or data.get("rsi") or 0)
+    atr14 = float(data.get("atr14") or data.get("atr") or 0)
+    ema200 = float(data.get("ema200") or 0)
+    ema50 = float(data.get("ema50") or 0)
+    price = float(data.get("price") or data.get("price_close") or 0)
+
+    # RSI interpretation
+    if rsi >= 70:
+        rsi_label = "sobrecomprado"
+    elif rsi <= 30:
+        rsi_label = "sobrevendido"
+    else:
+        rsi_label = "neutro"
+
+    # ATR as % of price
+    atr_pct = (atr14 / price * 100) if (price > 0 and atr14 > 0) else 0.0
+    vol_label = "alta" if atr_pct > 3.0 else ("moderada" if atr_pct > 1.0 else "baixa")
+
+    # Price vs EMA200
+    if price > 0 and ema200 > 0:
+        ema200_pos = "ACIMA" if price >= ema200 else "ABAIXO"
+    else:
+        ema200_pos = None
+
+    one_liner = (
+        f"{event_type}: {symbol} — regime {regime}, sinal {signal}, score {score}"
+        + (f", RSI {rsi:.1f} ({rsi_label})" if rsi > 0 else "")
+        + (f", preço {ema200_pos} da EMA200" if ema200_pos else "")
+        + "."
+    )
+
+    reasons = [
+        {
+            "label": "Condições atuais do ativo",
+            "plain": f"O ativo está em {regime} com sinal {signal}.",
+            "evidence": "regime/sinal do motor determinístico",
+        },
+        {
+            "label": "Pontuação de qualidade",
+            "plain": f"Score atual: {score}.",
+            "evidence": "score calculado pelo pipeline",
+        },
+    ]
+    if rsi > 0:
+        reasons.append({
+            "label": "RSI(14)",
+            "plain": f"RSI atual: {rsi:.1f} — {rsi_label}. "
+                     + ("Atenção: território de sobrecompra." if rsi >= 70
+                        else "Território de sobrevenda pode indicar recuperação." if rsi <= 30
+                        else "Momentum equilibrado."),
+            "evidence": f"rsi14={rsi:.2f}",
+        })
+    if atr14 > 0 and price > 0:
+        reasons.append({
+            "label": "Volatilidade (ATR)",
+            "plain": f"ATR: {atr14:.4f} ({atr_pct:.2f}% do preço) — volatilidade {vol_label}.",
+            "evidence": f"atr14={atr14:.4f}",
+        })
+    if ema200 > 0 and price > 0:
+        reasons.append({
+            "label": "Tendência de longo prazo (EMA200)",
+            "plain": f"Preço {ema200_pos} da EMA200 ({ema200:.4f}). "
+                     + ("Tendência de alta de longo prazo." if ema200_pos == "ACIMA"
+                        else "Tendência de baixa de longo prazo — risco elevado."),
+            "evidence": f"price={price:.4f}, ema200={ema200:.4f}",
+        })
+    if ema50 > 0 and price > 0:
+        ema50_pos = "ACIMA" if price >= ema50 else "ABAIXO"
+        reasons.append({
+            "label": "Tendência de médio prazo (EMA50)",
+            "plain": f"Preço {ema50_pos} da EMA50 ({ema50:.4f}).",
+            "evidence": f"price={price:.4f}, ema50={ema50:.4f}",
+        })
+    reasons.append({
+        "label": "Evento operacional",
+        "plain": f"Evento detectado: {event_type}.",
+        "evidence": "gatilho do trade-run/score",
+    })
+
+    # Dynamic mini-lesson: choose most relevant indicator
+    if rsi >= 70 or rsi <= 30:
+        mini = {
+            "term": "RSI (Índice de Força Relativa)",
+            "explain": "Mede o quão rápido o preço subiu ou caiu nos últimos 14 períodos, numa escala de 0 a 100.",
+            "analogy": "É como medir o cansaço de um corredor: acima de 70 ele está exausto de tanto subir, abaixo de 30 está no limite de tanto cair.",
+            "whyItMatters": "Ajuda a identificar momentos de sobrecompra (possível queda iminente) ou sobrevenda (possível recuperação).",
+        }
+    elif ema200_pos == "ABAIXO":
+        mini = {
+            "term": "EMA200 (Média Móvel Exponencial de 200 períodos)",
+            "explain": "É a média ponderada do preço nas últimas 200 velas, dando mais peso às mais recentes.",
+            "analogy": "Como a nota média do ano escolar: preço abaixo dela é como estar reprovado na tendência de longo prazo.",
+            "whyItMatters": "Traders institucionais usam a EMA200 como referência de tendência; preço abaixo dela aumenta o risco de novas quedas.",
+        }
+    else:
+        mini = {
+            "term": "ATR (Average True Range)",
+            "explain": "Mede a amplitude média de variação do preço em cada vela pelos últimos 14 períodos.",
+            "analogy": "Quanto maior o ATR, mais o preço 'balança' — como ondas num dia de tempestade vs. lago calmo.",
+            "whyItMatters": "Ajuda a calibrar stops e alvos para não ser derrubado pelo ruído normal do mercado.",
+        }
+
+    intermediario = (
+        f"Evento {event_type}: regime={regime}, sinal={signal}, score={score}"
+        + (f", RSI={rsi:.1f}" if rsi > 0 else "")
+        + (f", ATR={atr14:.4f} ({atr_pct:.2f}%)" if atr14 > 0 else "")
+        + (f", preço {ema200_pos} EMA200" if ema200_pos else "")
+        + "."
+    )
 
     return {
         "level": "LEIGO",
         "decisionOneLiner": one_liner,
-        "reasons": [
-            {
-                "label": "Condições atuais do ativo",
-                "plain": f"O ativo está em {regime} com sinal {signal}.",
-                "evidence": "regime/sinal do motor determinístico",
-            },
-            {
-                "label": "Pontuação de qualidade",
-                "plain": f"Score atual: {score}.",
-                "evidence": "score calculado pelo pipeline",
-            },
-            {
-                "label": "Evento operacional",
-                "plain": f"Evento detectado: {event_type}.",
-                "evidence": "gatilho do trade-run/score",
-            },
-        ],
+        "reasons": reasons,
         "whatToSeeNext": [
             "Acompanhar mudança de regime e sinal nas próximas execuções",
             "Verificar se score melhora acima dos limiares",
             "Validar risco (stop/take/daily loss) antes de reativar",
         ],
         "riskNote": "Explicação educacional; o motor de trade continua 100% determinístico.",
-        "miniLesson": {
-            "term": "ATR",
-            "explain": "ATR mede a volatilidade média do preço.",
-            "analogy": "Quanto maior o ATR, mais o preço 'balança'.",
-            "whyItMatters": "Ajuda a definir stops/takes mais realistas.",
-        },
+        "miniLesson": mini,
         "confidence": "medium",
         "disclaimer": "Conteúdo educacional, não é recomendação financeira.",
         "levels": {
             "LEIGO": one_liner,
-            "INTERMEDIARIO": f"Evento {event_type} com regime={regime}, sinal={signal}, score={score}.",
+            "INTERMEDIARIO": intermediario,
             "TECNICO": {
                 "eventType": event_type,
                 "symbol": symbol,

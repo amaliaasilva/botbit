@@ -551,6 +551,8 @@ def _ensure_resting_order(
     atr_mult = _safe_float(resting_cfg.get("atrMult"), 0.8)
     refresh_minutes = _safe_float(resting_cfg.get("refreshMinutes"), 60)
     max_age_minutes = _safe_float(resting_cfg.get("maxOrderAgeMinutes"), 360)
+    max_slots = int(_safe_float(resting_cfg.get("maxSlots"), 3))
+    max_alloc_pct = _safe_float(resting_cfg.get("maxAllocPct"), 0.50)
     anchor_symbols = resting_cfg.get("anchorSymbolsIfNone") or ["BTCUSDT", "ETHUSDT"]
     now = _now()
 
@@ -592,9 +594,34 @@ def _ensure_resting_order(
             fs.update_trade_intent(intent_id, {"status": "CANCELLED", "cancelReason": cancel_reason})
             cancelled_any = True
 
-    if existing_resting and not cancelled_any:
-        # Valid resting intent exists — check refresh window
-        newest = max(existing_resting, key=lambda i: (i.get("createdAt") or now))
+    # After cancellations, re-count genuinely active resting intents
+    if cancelled_any:
+        # Re-fetch to get accurate post-cancel state
+        active_after_cancel = []
+        for st in ("RESTING_PENDING", "RESTING_SUBMITTED"):
+            active_after_cancel.extend(fs.list_trade_intents(status=st, limit_size=20))
+    else:
+        active_after_cancel = list(existing_resting)
+
+    # Symbols already in a resting order — avoid duplicates
+    resting_symbols = {str(i.get("symbol", "")).upper() for i in active_after_cancel}
+
+    # Slots full check
+    if len(active_after_cancel) >= max_slots:
+        if active_after_cancel:
+            newest = max(active_after_cancel, key=lambda i: (i.get("createdAt") or now))
+            created_at = newest.get("createdAt")
+            try:
+                created_dt = created_at.replace(tzinfo=None) if (created_at and getattr(created_at, "tzinfo", None)) else (created_at or now)
+            except Exception:
+                created_dt = now
+            age_minutes = (now - created_dt).total_seconds() / 60.0
+            return {"action": "slots_full", "active": len(active_after_cancel), "maxSlots": max_slots, "newestAgeMinutes": round(age_minutes, 1)}
+        return {"action": "slots_full", "active": 0, "maxSlots": max_slots}
+
+    # If slots not full but we created a new one recently enough — respect refresh window
+    if active_after_cancel and not cancelled_any:
+        newest = max(active_after_cancel, key=lambda i: (i.get("createdAt") or now))
         created_at = newest.get("createdAt")
         try:
             created_dt = created_at.replace(tzinfo=None) if (created_at and getattr(created_at, "tzinfo", None)) else (created_at or now)
@@ -602,14 +629,26 @@ def _ensure_resting_order(
             created_dt = now
         age_minutes = (now - created_dt).total_seconds() / 60.0
         if age_minutes < refresh_minutes:
-            return {"action": "resting_active", "intentId": newest.get("intentId"), "ageMinutes": round(age_minutes, 1)}
+            return {"action": "resting_active", "intentId": newest.get("intentId"), "active": len(active_after_cancel), "ageMinutes": round(age_minutes, 1)}
+
+    # Capital concurrency ceiling across all active resting orders
+    equity = _safe_float(state.get("equityUSDT"), _safe_float(config.get("paperInitialCashUSDT"), 1000))
+    committed = sum(
+        _safe_float(i.get("price"), 0) * _safe_float(i.get("quantity"), 0)
+        for i in active_after_cancel
+    )
+    capital_ceiling = equity * max_alloc_pct
+    if capital_ceiling > 0 and committed >= capital_ceiling:
+        return {"action": "capital_ceiling_reached", "committed": round(committed, 2), "ceiling": round(capital_ceiling, 2)}
 
     # ── Select candidate: STRICT → FALLBACK → ANCHOR ──
     selected_candidate = None
     decision_profile = "STRICT"
 
-    if resting_candidates:
-        selected_candidate = resting_candidates[0]
+    # Filter STRICT candidates: exclude symbols already in resting
+    strict_candidates = [c for c in resting_candidates if str(c.get("symbol","")).upper() not in resting_symbols]
+    if strict_candidates:
+        selected_candidate = strict_candidates[0]
         decision_profile = "STRICT"
     else:
         # FALLBACK
@@ -639,9 +678,19 @@ def _ensure_resting_order(
                 or (quote_map.get(sym) or {}).get("volume24h"),
                 0
             )
+            if sym in resting_symbols:
+                continue
             if (regime in allowed_regimes and signal in allowed_signals
                     and score >= min_score and potential >= min_potential and volume >= min_volume):
+                # Safety guard 1: RSI < 70 (avoid buying obvious top)
+                rsi_val = _safe_float(mkt.get("rsi14") or km.get("rsi14"), 50)
+                if rsi_val >= 70:
+                    continue
                 price_fb = _safe_float((quote_map.get(sym) or {}).get("price"), 0) or _safe_float(mkt.get("price_close") or mkt.get("price"), 0)
+                # Safety guard 2: price must be above EMA200 (no catching falling knives)
+                ema200_fb = _safe_float(mkt.get("ema200"), 0)
+                if ema200_fb > 0 and price_fb < ema200_fb:
+                    continue
                 # atr14 from market_map; fall back to keyMetrics.atr_pct (percentage) × price
                 atr_pct_val = _safe_float(km.get("atr_pct"), 0) * price_fb
                 atr_fb = max(_safe_float(mkt.get("atr14") or row.get("atr"), 0), atr_pct_val, price_fb * 0.003)
@@ -654,8 +703,10 @@ def _ensure_resting_order(
                 break
 
     if selected_candidate is None:
-        # ANCHOR
+        # ANCHOR (also skip symbols already in resting)
         for sym in anchor_symbols:
+            if sym in resting_symbols:
+                continue
             mkt = market_map.get(sym) or {}
             price_anchor = _safe_float((quote_map.get(sym) or {}).get("price"), 0) or _safe_float(mkt.get("price_close") or mkt.get("price"), 0)
             atr_anchor = max(_safe_float(mkt.get("atr14"), 0), price_anchor * 0.003)
@@ -684,7 +735,7 @@ def _ensure_resting_order(
 
     # Notional: fallbackSizeMultiplier × normal allocation
     size_mult = _safe_float(resting_cfg.get("fallbackSizeMultiplier"), 0.25)
-    equity = _safe_float(state.get("equityUSDT"), _safe_float(config.get("paperInitialCashUSDT"), 1000))
+    # equity already computed above for capital ceiling check
     cash = _safe_float(state.get("cashUSDT"), equity)
     max_notional_pct = _safe_float(config.get("maxNotionalPerTradePct"), 35) / 100.0
     notional = min(equity * max_notional_pct, cash * 0.98) * size_mult

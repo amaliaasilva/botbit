@@ -810,6 +810,22 @@ python tools/testnet_executor.py`}</pre>
                   onChange={(e) => patchTradingField("resting.anchorSymbolsIfNone", e.target.value.split(",").map(s => s.trim().toUpperCase()).filter(Boolean))}
                 />
               </label>
+              <label>
+                Slots simultâneos (maxRestingOrders)
+                <input
+                  type="number" step="1" min="1" max="5"
+                  value={Number(tradingConfig?.resting?.maxRestingOrders ?? 1)}
+                  onChange={(e) => patchTradingField("resting.maxRestingOrders", Number(e.target.value))}
+                />
+              </label>
+              <label>
+                Alocação máx. total % (maxRestingAllocationPct)
+                <input
+                  type="number" step="5" min="5" max="80"
+                  value={Number(tradingConfig?.resting?.maxRestingAllocationPct ?? 30)}
+                  onChange={(e) => patchTradingField("resting.maxRestingAllocationPct", Number(e.target.value))}
+                />
+              </label>
             </div>
 
             {/* Current resting intents */}
