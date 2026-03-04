@@ -13,24 +13,29 @@ class BinanceClient:
         self.max_retries = max_retries
 
     def _request(self, path: str, params: dict[str, Any]) -> Any:
-        last_response = None
+        last_exc: Exception | None = None
         for base_url in self.BASE_URLS:
             url = f"{base_url}{path}"
             for attempt in range(1, self.max_retries + 1):
-                response = requests.get(url, params=params, timeout=self.timeout_seconds)
-                last_response = response
+                try:
+                    response = requests.get(url, params=params, timeout=self.timeout_seconds)
+                except requests.exceptions.RequestException as exc:
+                    # Erro de rede (sem rota, timeout, reset) — tenta próximo base URL
+                    last_exc = exc
+                    time.sleep(min(attempt, 3))
+                    break  # abandona este base_url, tenta o próximo
                 if response.status_code == 429:
                     time.sleep(min(2**attempt, 10))
                     continue
                 if response.status_code == 451:
-                    break
+                    break  # geo-block neste base_url, tenta próximo
                 if response.status_code >= 500:
                     time.sleep(attempt)
                     continue
                 response.raise_for_status()
                 return response.json()
-        if last_response is not None:
-            last_response.raise_for_status()
+        if last_exc is not None:
+            raise last_exc
         return None
 
     def fetch_klines(self, symbol: str, interval: str = "4h", limit: int = 1000) -> pd.DataFrame:
