@@ -314,36 +314,20 @@ def get_trade_intents(
 
 @app.get("/api/trading/live-gate-status")
 def api_trading_live_gate_status(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
-    """Retorna status real de cada gate de proteção LIVE sem expor valores dos secrets."""
+    """Retorna status dos gates de proteção LIVE."""
     settings = get_settings()
     fs = FirestoreNotificationStorage(settings.gcp_project_id)
     config = fs.get_trading_config()
     guard = config.get("liveGuard") or {}
 
-    # Check each gate individually
     g1_enabled = bool(config.get("enabled", False))
     g1_mode_live = str(config.get("mode") or "").upper() == "LIVE"
-
-    confirm_text = str(guard.get("doubleConfirmText") or "LIVE").upper()
-    typed = str(guard.get("typedText") or "").upper()
     g2_confirmed = bool(guard.get("liveConfirmed", False))
-    g2_text_ok = typed == confirm_text
-
-    cooldown_minutes = int(guard.get("cooldownMinutes") or 1)  # default 1 min
-    cooldown_remaining = 0.0
-    confirmed_at = _parse_ts(guard.get("liveConfirmedAt"))
-    if confirmed_at:
-        elapsed = (_now() - confirmed_at).total_seconds() / 60.0
-        cooldown_remaining = max(0.0, cooldown_minutes - elapsed)
-    g2_cooldown_ok = confirmed_at is not None and cooldown_remaining == 0.0
-
-    g3_feature_flag = str(get_secret("LIVE_TRADING_ENABLED") or "false").lower() == "true"
-    armed_secret = str(get_secret("LIVE_TRADING_ARMED") or "").strip()
-    g4_armed = armed_secret == "YES_I_KNOW_WHAT_IM_DOING"
+    g2_field1_ok = str(guard.get("typedText") or "").strip().upper() == "LIVE"
+    g2_field2_ok = str(guard.get("typedText2") or "").strip().upper() == "EU CONFIRMO"
 
     gate_ok, gate_reason = _live_gate_ok(config)
 
-    # Alert infra diagnostics (no secret values exposed)
     webhook_url = get_secret("APP_SCRIPT_WEBHOOK_URL") or ""
     webhook_token = get_secret("ALERT_WEBHOOK_TOKEN") or ""
     alert_email = get_secret("ALERT_OWNER_EMAIL") or ""
@@ -353,7 +337,6 @@ def api_trading_live_gate_status(auth: AuthContext = Depends(require_auth)) -> d
         "reason": gate_reason,
         "mode": str(config.get("mode") or "PAPER").upper(),
         "enabled": g1_enabled,
-        "cooldownRemainingMinutes": round(cooldown_remaining, 1),
         "alertsConfigured": bool(webhook_url and webhook_token and alert_email),
         "alertWebhookSet": bool(webhook_url),
         "alertTokenSet": bool(webhook_token),
@@ -362,11 +345,8 @@ def api_trading_live_gate_status(auth: AuthContext = Depends(require_auth)) -> d
             "g1_enabled": g1_enabled,
             "g1_mode_live": g1_mode_live,
             "g2_confirmed": g2_confirmed,
-            "g2_text_ok": g2_text_ok,
-            "g2_cooldown_ok": g2_cooldown_ok,
-            "g2_cooldown_remaining_minutes": round(cooldown_remaining, 1),
-            "g3_feature_flag_enabled": g3_feature_flag,
-            "g4_armed": g4_armed,
+            "g2_field1_ok": g2_field1_ok,
+            "g2_field2_ok": g2_field2_ok,
         },
     }
 
@@ -380,14 +360,34 @@ def api_alerts_test(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]
 
     webhook_url = get_secret("APP_SCRIPT_WEBHOOK_URL") or ""
     token = get_secret("ALERT_WEBHOOK_TOKEN") or ""
-    email = get_secret("ALERT_OWNER_EMAIL") or ""
+    owner_email = get_secret("ALERT_OWNER_EMAIL") or ""
+
+    # Also read user's alertEmail from Firestore profile settings
+    extra_email = ""
+    try:
+        user_doc = fs.client.collection("users").document(auth.uid).get()
+        if user_doc.exists:
+            extra_email = str(user_doc.to_dict().get("alertEmail") or "")
+    except Exception:
+        pass
+
+    # Collect unique non-empty recipients
+    all_emails = list(dict.fromkeys(e.strip() for e in [owner_email, extra_email] if e.strip()))
+
+    def _mask(e: str) -> str:
+        if "@" not in e:
+            return e[:4] + "***"
+        user_part, domain = e.split("@", 1)
+        return user_part[:3] + "***@" + domain
 
     alerter = AppScriptEmailAlerter(webhook_url, token)
     result: dict[str, Any] = {
         "webhookConfigured": bool(webhook_url),
         "tokenConfigured": bool(token),
-        "emailConfigured": bool(email),
-        "emailTarget": (email[:3] + "***@" + email.split("@")[-1]) if "@" in email else (email[:4] + "***" if email else ""),
+        "emailConfigured": bool(all_emails),
+        "recipients": [_mask(e) for e in all_emails],
+        # keep old field for frontend compat
+        "emailTarget": ", ".join(_mask(e) for e in all_emails),
     }
 
     # Always write Firestore in-app notification
@@ -407,21 +407,22 @@ def api_alerts_test(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]
     )
     result["inAppWritten"] = True
 
-    if alerter.is_enabled() and email:
-        try:
-            ok = alerter.send_email(
-                email,
-                "[BotBit] 🔔 Teste de alerta",
-                f"Notificação de teste enviada por {auth.uid[:8]} em {datetime.utcnow().isoformat()}Z.",
-                {"test": True, "uid": auth.uid[:8]},
-            )
-            result["emailSent"] = ok
-        except Exception as exc:
-            result["emailSent"] = False
-            result["emailError"] = str(exc)[:300]
+    if alerter.is_enabled() and all_emails:
+        ok, err = alerter.send_email(
+            all_emails,
+            "[BotBit] 🔔 Teste de alerta",
+            f"Notificação de teste enviada em {datetime.utcnow().isoformat()}Z. Destinatários: {', '.join(all_emails)}",
+            {"test": True, "uid": auth.uid[:8]},
+        )
+        result["emailSent"] = ok
+        if err:
+            result["emailError"] = err
     else:
         result["emailSent"] = False
-        result["emailSkipped"] = "webhook ou token não configurado no Cloud Run"
+        if not alerter.is_enabled():
+            result["emailSkipped"] = "APP_SCRIPT_WEBHOOK_URL ou ALERT_WEBHOOK_TOKEN não configurados"
+        else:
+            result["emailSkipped"] = "nenhum destinatário configurado"
 
     return {"ok": True, **result}
 

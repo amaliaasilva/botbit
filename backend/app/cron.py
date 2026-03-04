@@ -144,7 +144,7 @@ def _send_alert_if_needed(
     storage: BigQueryStorage,
     fs_storage: FirestoreNotificationStorage | None,
     alerter: AppScriptEmailAlerter,
-    destination_email: str,
+    destination_email: str | list[str],
     owner_uid: str,
     symbol: str,
     previous: dict[str, Any] | None,
@@ -181,7 +181,7 @@ def _send_alert_if_needed(
 
     # Always persist in BigQuery + Firestore regardless of email outcome
     storage.insert_alert(alert_id, symbol, str(latest_signal), datetime.fromisoformat(str(latest.get("ts")).replace("Z", "+00:00")))
-    email_ok = alerter.send_email(destination_email, subject, message, {"symbol": symbol, "event": alert_type})
+    email_ok, email_err = alerter.send_email(destination_email, subject, message, {"symbol": symbol, "event": alert_type})
     if fs_storage and owner_uid:
         fs_storage.add_notification(
             owner_uid,
@@ -194,13 +194,40 @@ def _send_alert_if_needed(
                 "score": current_score,
                 "message": message,
                 "emailSent": email_ok,
+                "emailError": email_err or None,
             },
         )
     return True
 
 
-def _resolve_universe(binance: BinanceClient) -> list[str]:
+def _resolve_universe(binance: BinanceClient, fs_storage: FirestoreNotificationStorage | None = None) -> list[str]:
+    """Resolve the score/quotes universe.
+
+    Priority:
+    1. config/score_universe_current.symbols   (if it exists and is non-empty)
+    2. Fallback: DEFAULT_BINANCE_SYMBOLS + Binance top-N   (legacy behaviour)
+    """
     settings = get_settings()
+
+    # ── 1. Try governed universe ──────────────────────────────────────────────
+    if fs_storage:
+        try:
+            universe_doc = fs_storage.get_score_universe()
+            if universe_doc:
+                symbols = universe_doc.get("symbols") or []
+                if isinstance(symbols, list) and len(symbols) >= 3:
+                    normalized = []
+                    for s in symbols:
+                        ns = _normalize_symbol(s)
+                        if _is_supported_symbol(ns) and ns not in normalized:
+                            normalized.append(ns)
+                    if normalized:
+                        log_event(logger, "universe_source", source="score_universe_current", count=len(normalized))
+                        return normalized
+        except Exception as exc:
+            log_event(logger, "score_universe_read_error", error=str(exc))
+
+    # ── 2. Fallback: legacy behaviour ─────────────────────────────────────────
     discovered: list[str] = []
     try:
         discovered = binance.fetch_top_usdt_symbols(settings.binance_universe_size)
@@ -216,6 +243,7 @@ def _resolve_universe(binance: BinanceClient) -> list[str]:
             continue
         merged.append(normalized)
 
+    log_event(logger, "universe_source", source="legacy_fallback", count=len(merged[:max(1, settings.binance_universe_size)]))
     return merged[: max(1, settings.binance_universe_size)]
 
 
@@ -223,7 +251,16 @@ def run_quotes_pipeline() -> dict[str, Any]:
     settings = get_settings()
     binance = BinanceClient()
     fs_storage = FirestoreNotificationStorage(settings.gcp_project_id) if settings.gcp_project_id else None
-    symbols = _resolve_universe(binance)
+    symbols = _resolve_universe(binance, fs_storage)
+
+    # Clean stale quote docs no longer in the universe
+    if fs_storage:
+        try:
+            stale_deleted = fs_storage.delete_stale_quote_docs(symbols)
+            if stale_deleted:
+                log_event(logger, "stale_quotes_cleaned", deleted=stale_deleted)
+        except Exception as exc:
+            log_event(logger, "stale_quotes_clean_error", error=str(exc))
 
     updated = 0
     failed = 0
@@ -287,7 +324,31 @@ def run_score_pipeline() -> dict[str, Any]:
     alert_owner_uid = get_secret("FIREBASE_OWNER_UID") or ""
     alerter = AppScriptEmailAlerter(app_script_webhook_url, alert_webhook_token)
 
-    symbols = _resolve_universe(binance)
+    # Also collect alertEmail from Firestore users who opted in
+    extra_emails: list[str] = []
+    if fs_storage:
+        try:
+            for uid in fs_storage.list_user_ids(limit_size=20):
+                doc = fs_storage.client.collection("users").document(uid).get()
+                if doc.exists:
+                    d = doc.to_dict() or {}
+                    user_email = str(d.get("alertEmail") or "").strip()
+                    if user_email and user_email != alert_owner_email and user_email not in extra_emails:
+                        extra_emails.append(user_email)
+        except Exception as exc:
+            log_event(logger, "extra_emails_fetch_failed", error=str(exc))
+    all_alert_emails = [e for e in [alert_owner_email] + extra_emails if e]
+
+    symbols = _resolve_universe(binance, fs_storage)
+
+    # Clean stale market docs no longer in the universe
+    if fs_storage:
+        try:
+            stale_deleted = fs_storage.delete_stale_market_docs(symbols)
+            if stale_deleted:
+                log_event(logger, "stale_market_docs_cleaned", deleted=stale_deleted)
+        except Exception as exc:
+            log_event(logger, "stale_market_clean_error", error=str(exc))
 
     updated = 0
     failed = 0
@@ -379,7 +440,7 @@ def run_score_pipeline() -> dict[str, Any]:
                     storage,
                     fs_storage,
                     alerter,
-                    alert_owner_email,
+                    all_alert_emails,
                     alert_owner_uid,
                     symbol,
                     previous,
