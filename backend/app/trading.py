@@ -1424,6 +1424,37 @@ def run_trade_pipeline() -> dict[str, Any]:
 
         exchange_info = BinanceClient().fetch_exchange_info()
 
+        # ── Sync real USDT balance for LIVE / TESTNET ─────────────────────────
+        # In paper mode, cashUSDT is tracked manually in Firestore.
+        # In LIVE/TESTNET the source of truth is the actual Binance wallet.
+        # free  = USDT disponível para novas ordens
+        # locked= USDT bloqueado em ordens abertas (inclui resting orders GTC)
+        # cashUSDT = free + locked (carteira total — não muda com ordens)
+        _binance_usdt_free: float | None = None
+        _binance_usdt_locked: float | None = None
+        if mode in ("LIVE", "TESTNET"):
+            try:
+                _acct_client = BinanceTradeClient(api_key=api_key, api_secret=api_secret, mode=mode)
+                _acct = _acct_client.get_account()
+                _balances = _acct.get("balances") or []
+                _usdt_bal = next((b for b in _balances if b.get("asset") == "USDT"), None)
+                if _usdt_bal:
+                    _binance_usdt_free = _safe_float(_usdt_bal.get("free"), 0)
+                    _binance_usdt_locked = _safe_float(_usdt_bal.get("locked"), 0)
+                    # Override Firestore value with real wallet
+                    state["cashUSDT"] = _binance_usdt_free + _binance_usdt_locked
+                    log_event(
+                        logger,
+                        "usdt_balance_synced",
+                        run_id=run_id,
+                        mode=mode,
+                        free=_binance_usdt_free,
+                        locked=_binance_usdt_locked,
+                        total=state["cashUSDT"],
+                    )
+            except Exception as _bal_exc:
+                log_event(logger, "usdt_balance_sync_error", run_id=run_id, mode=mode, error=str(_bal_exc))
+
         for candidate in candidates:
             symbol = candidate["symbol"]
             if any(str(pos.get("symbol") or "") == symbol for pos in open_positions):
@@ -1698,18 +1729,24 @@ def run_trade_pipeline() -> dict[str, Any]:
         except Exception as _resting_exc:
             errors.append({"symbol": "_resting", "error": str(_resting_exc)})
 
-        # Compute reserved capital from all active resting orders (for UI display)
+        # Compute reserved capital from active resting orders.
+        # For LIVE/TESTNET: use the real Binance locked balance (source of truth).
+        # For PAPER: sum reservedNotionalUSDT from Firestore resting intents.
         _active_resting: list[dict] = []
         for _rst in ("RESTING_PENDING", "RESTING_SUBMITTED"):
             _active_resting.extend(fs.list_trade_intents(status=_rst, limit_size=30))
-        reserved_usdt = sum(
-            _safe_float(
-                i.get("reservedNotionalUSDT")
-                or _safe_float(i.get("price"), 0) * _safe_float(i.get("quantity"), 0),
-                0,
+        if _binance_usdt_locked is not None:
+            # Real Binance locked already reflects all open GTC orders
+            reserved_usdt = _binance_usdt_locked
+        else:
+            reserved_usdt = sum(
+                _safe_float(
+                    i.get("reservedNotionalUSDT")
+                    or _safe_float(i.get("price"), 0) * _safe_float(i.get("quantity"), 0),
+                    0,
+                )
+                for i in _active_resting
             )
-            for i in _active_resting
-        )
 
         open_positions = fs.list_trading_positions(status="OPEN", limit_size=300)
         position_rows = []
@@ -1746,7 +1783,11 @@ def run_trade_pipeline() -> dict[str, Any]:
             _mark_fail_safe(fs, alerts, owner_uid, "DAILY_LOSS_CUT")
 
         summary = f"executed={executed} skipped={skipped} candidates={len(candidates)} mode={mode}"
-        available_usdt = round(max(0.0, state_cash - reserved_usdt), 6)
+        # available = free USDT from Binance (LIVE/TESTNET) or cashUSDT - reserved (PAPER)
+        if _binance_usdt_free is not None:
+            available_usdt = round(_binance_usdt_free, 6)
+        else:
+            available_usdt = round(max(0.0, state_cash - reserved_usdt), 6)
         fs.upsert_trading_state(
             {
                 "enabled": bool(config.get("enabled", False)),
