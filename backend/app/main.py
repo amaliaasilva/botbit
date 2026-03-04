@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 import requests
 
 from app.auth import AuthContext, require_auth
@@ -16,7 +17,7 @@ from app.sources.binance import BinanceClient
 from app.sources.binance_trade import BinanceTradeClient
 from app.storage.bigquery_client import BigQueryStorage
 from app.storage.firestore_client import FirestoreNotificationStorage
-from app.trading import run_trade_pipeline, _live_gate_ok
+from app.trading import run_trade_pipeline, _live_gate_ok, execute_manual_order
 
 app = FastAPI(title="Market AI Scoring", version="1.0.0")
 
@@ -48,6 +49,18 @@ def _firestore() -> FirestoreNotificationStorage | None:
     if not settings.gcp_project_id:
         return None
     return FirestoreNotificationStorage(settings.gcp_project_id)
+
+
+def require_cron(x_cron_secret: str = Header(default="")) -> None:
+    """Protege endpoints /cron/* com CRON_SECRET no header X-Cron-Secret.
+    Se o secret não estiver configurado no GCP, aceita sem verificação
+    (compatibilidade retroativa com Cloud Scheduler existente).
+    """
+    expected = get_secret("CRON_SECRET") or ""
+    if not expected:
+        return  # secret not configured — allow (backward compat)
+    if x_cron_secret != expected:
+        raise HTTPException(status_code=403, detail="cron_secret_invalid")
 
 
 @app.get("/health")
@@ -107,7 +120,7 @@ def binance_time() -> dict[str, Any]:
 
 
 @app.post("/cron/discover")
-def cron_discover() -> dict[str, Any]:
+def cron_discover(_: None = Depends(require_cron)) -> dict[str, Any]:
     started_at = datetime.utcnow().isoformat()
     result = run_discover_pipeline()
     log_event(logger, "cron_discover_finished", started_at=started_at, **result)
@@ -141,12 +154,12 @@ def public_quotes_top() -> dict[str, Any]:
 
 
 @app.get("/api/discover")
-def api_discover() -> dict[str, Any]:
+def api_discover(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
     return {"items": get_discover_latest(50)}
 
 
 @app.post("/cron/trade-run")
-def cron_trade_run() -> dict[str, Any]:
+def cron_trade_run(_: None = Depends(require_cron)) -> dict[str, Any]:
     started_at = datetime.utcnow().isoformat()
     result = run_trade_pipeline()
     log_event(logger, "cron_trade_run_finished", started_at=started_at, **result)
@@ -453,7 +466,38 @@ def api_trading_emergency_stop(auth: AuthContext = Depends(require_auth)) -> dic
     return {"ok": True, "enabled": False, "reason": "EMERGENCY_STOP_API"}
 
 
-@app.get("/internal/egress-ip")
+class OrderRequest(BaseModel):
+    symbol: str = Field(..., description="Par Binance, ex: BTCUSDT")
+    side: str = Field(..., description="BUY ou SELL")
+    quoteQty: float = Field(50.0, ge=5.0, le=10000.0, description="USDT a usar (só BUY)")
+    confirm: bool = Field(False, description="true obrigatório para modo LIVE")
+
+
+@app.post("/api/order")
+def api_place_order(
+    body: OrderRequest,
+    auth: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    """Executa uma ordem manual (BUY/SELL) em nome do usuário autenticado."""
+    settings = get_settings()
+    fs = FirestoreNotificationStorage(settings.gcp_project_id)
+    bq = BigQueryStorage(settings.gcp_project_id, settings.bq_dataset, settings.bq_location)
+    bq.ensure_dataset_and_tables()
+
+    result = execute_manual_order(
+        fs=fs,
+        bq=bq,
+        uid=auth.uid,
+        symbol=body.symbol,
+        side=body.side,
+        quote_qty=body.quoteQty,
+        confirm=body.confirm,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "order_failed"))
+    return result
+
+
 def internal_egress_ip() -> dict[str, Any]:
     response = requests.get("https://ifconfig.me/ip", timeout=10)
     response.raise_for_status()
@@ -649,7 +693,7 @@ def internal_binance_validate(auth: AuthContext = Depends(require_auth)) -> dict
 
 
 @app.post("/cron/quotes")
-def cron_quotes() -> dict[str, Any]:
+def cron_quotes(_: None = Depends(require_cron)) -> dict[str, Any]:
     started_at = datetime.utcnow().isoformat()
     result = run_quotes_pipeline()
     log_event(logger, "cron_quotes_finished", started_at=started_at, **result)
@@ -657,7 +701,7 @@ def cron_quotes() -> dict[str, Any]:
 
 
 @app.get("/api/live-quotes")
-def api_live_quotes(symbols: str = "") -> dict[str, Any]:
+def api_live_quotes(symbols: str = "", auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
     """Fetch live ticker data from Binance for arbitrary symbols.
     Usage: /api/live-quotes?symbols=DOTUSDT,ADAUSDT
     """
@@ -711,7 +755,7 @@ def internal_executor_status(auth: AuthContext = Depends(require_auth)) -> dict[
 
 
 @app.post("/cron/score")
-def cron_score() -> dict[str, Any]:
+def cron_score(_: None = Depends(require_cron)) -> dict[str, Any]:
     started_at = datetime.utcnow().isoformat()
     result = run_score_pipeline()
     log_event(logger, "cron_score_finished", started_at=started_at, **result)
@@ -719,7 +763,7 @@ def cron_score() -> dict[str, Any]:
 
 
 @app.post("/cron/run")
-def cron_run() -> dict[str, Any]:
+def cron_run(_: None = Depends(require_cron)) -> dict[str, Any]:
     started_at = datetime.utcnow().isoformat()
     result = run_score_pipeline()
     log_event(logger, "cron_run_finished", started_at=started_at, **result)
@@ -727,7 +771,7 @@ def cron_run() -> dict[str, Any]:
 
 
 @app.get("/api/explain/{symbol}")
-def api_explain(symbol: str) -> dict[str, Any]:
+def api_explain(symbol: str, auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
     """Generate a 3-level AI explanation for an asset using Gemini.
     Falls back to deterministic explanation if Gemini is unavailable.
     """

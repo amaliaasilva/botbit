@@ -496,6 +496,188 @@ def _live_gate_ok(config: dict[str, Any]) -> tuple[bool, str]:
     return True, "OK"
 
 
+def execute_manual_order(
+    fs: "FirestoreNotificationStorage",
+    bq: "BigQueryStorage",
+    uid: str,
+    symbol: str,
+    side: str,
+    quote_qty: float = 50.0,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Execute a manual market order (BUY or SELL) on behalf of a user.
+
+    Modes
+    -----
+    PAPER   — fully simulated, updates Firestore paper positions/state
+    TESTNET — real order on Binance Testnet (uses BINANCE_TESTNET_* secrets)
+    LIVE    — real money (requires confirm=True + _live_gate_ok pass)
+    """
+    symbol = str(symbol or "").strip().upper()
+    side = str(side or "").strip().upper()
+    if side not in {"BUY", "SELL"}:
+        return {"ok": False, "error": "invalid_side"}
+    if not symbol.endswith("USDT") or len(symbol) < 5:
+        return {"ok": False, "error": "invalid_symbol"}
+
+    config = fs.get_trading_config()
+    mode = str(config.get("mode") or "PAPER").upper()
+    if mode not in {"PAPER", "TESTNET", "LIVE"}:
+        mode = "PAPER"
+
+    if mode == "LIVE":
+        if not confirm:
+            return {"ok": False, "error": "live_confirm_required"}
+        gate_ok, gate_reason = _live_gate_ok(config)
+        if not gate_ok:
+            return {"ok": False, "error": f"live_gate_blocked:{gate_reason}"}
+
+    # Resolve current price from Firestore quotes
+    quotes_rows = fs.list_quotes(limit_size=500)
+    q = next((r for r in quotes_rows if str(r.get("symbol", "")).upper() == symbol), None)
+    price = _safe_float((q or {}).get("price"), 0)
+    if price <= 0:
+        return {"ok": False, "error": "price_unavailable"}
+
+    atr = _safe_float((q or {}).get("atr14"), price * 0.01)
+    if atr <= 0:
+        atr = price * 0.01
+
+    now = _now()
+    run_id = now.strftime("manual-%Y%m%dT%H%M%S")
+
+    # ── PAPER ──────────────────────────────────────────────────────────────
+    if mode == "PAPER":
+        state = fs.get_trading_state()
+
+        if side == "BUY":
+            existing = fs.list_trading_positions(status="OPEN", limit_size=200)
+            if any(str(p.get("symbol", "")).upper() == symbol for p in existing):
+                return {"ok": False, "error": "position_already_open"}
+
+            equity = _safe_float(state.get("equityUSDT"), _safe_float(config.get("paperInitialCashUSDT"), 1000))
+            cash = _safe_float(state.get("cashUSDT"), equity)
+            notional = min(float(quote_qty), cash * 0.98)
+            if notional < 10:
+                return {"ok": False, "error": "insufficient_paper_cash"}
+
+            stop_mult = _safe_float(((config.get("exit") or {}).get("stopAtrMult")), 1.5)
+            take_mult = _safe_float(((config.get("exit") or {}).get("takeAtrMult")), 2.5)
+            stop_price = max(0.0, price - stop_mult * atr)
+            take_price = price + take_mult * atr
+            qty = _round_step(notional / price, 0.000001)
+            if qty <= 0:
+                return {"ok": False, "error": "qty_zero"}
+
+            order_id = _dedupe_order_id(run_id, symbol, "BUY", "PAPER")
+            state["cashUSDT"] = max(0.0, cash - qty * price)
+
+            fs.upsert_trading_position(symbol, {
+                "symbol": symbol, "mode": "PAPER", "status": "OPEN",
+                "qty": qty, "avgEntry": price, "lastPrice": price,
+                "pnlUnrealized": 0.0, "stopPrice": stop_price, "takePrice": take_price,
+                "ocoStatus": "SIMULATED", "initialRisk": max(price - stop_price, 1e-9),
+                "openedAt": now, "updatedAt": now, "source": "manual", "openedByUid": uid,
+            })
+            fs.upsert_trading_state(state)
+            fs.upsert_trading_order(order_id, {
+                "orderId": order_id, "symbol": symbol, "side": "BUY",
+                "mode": "PAPER", "status": "FILLED", "source": "manual",
+                "notional": round(notional, 2), "price": price, "qty": qty,
+                "openedByUid": uid, "createdAt": now,
+            })
+            log_event(logger, "manual_order_paper_buy", uid=uid, symbol=symbol, price=price, qty=qty)
+            return {"ok": True, "orderId": order_id, "mode": "PAPER", "side": "BUY",
+                    "symbol": symbol, "executedPrice": price, "qty": qty,
+                    "stopPrice": stop_price, "takePrice": take_price,
+                    "executedAt": now.isoformat()}
+
+        else:  # SELL
+            existing = fs.list_trading_positions(status="OPEN", limit_size=200)
+            position = next((p for p in existing if str(p.get("symbol", "")).upper() == symbol), None)
+            if not position:
+                return {"ok": False, "error": "no_open_position"}
+            state = fs.get_trading_state()
+            _close_position_paper(fs, bq, run_id, position, price, "MANUAL_SELL", state)
+            fs.upsert_trading_state(state)
+            order_id = _dedupe_order_id(run_id, symbol, "SELL", "PAPER")
+            fs.upsert_trading_order(order_id, {
+                "orderId": order_id, "symbol": symbol, "side": "SELL",
+                "mode": "PAPER", "status": "FILLED", "source": "manual",
+                "price": price, "openedByUid": uid, "createdAt": now,
+            })
+            log_event(logger, "manual_order_paper_sell", uid=uid, symbol=symbol, price=price)
+            return {"ok": True, "orderId": order_id, "mode": "PAPER", "side": "SELL",
+                    "symbol": symbol, "executedPrice": price, "executedAt": now.isoformat()}
+
+    # ── TESTNET / LIVE ─────────────────────────────────────────────────────
+    if mode == "TESTNET":
+        api_key = get_secret("BINANCE_TESTNET_API_KEY")
+        api_secret = get_secret("BINANCE_TESTNET_API_SECRET")
+    else:
+        api_key = get_secret("BINANCE_API_KEY")
+        api_secret = get_secret("BINANCE_API_SECRET")
+
+    if not api_key or not api_secret:
+        return {"ok": False, "error": f"no_api_keys_for_{mode}"}
+
+    client = BinanceTradeClient(api_key, api_secret, mode=mode)
+    try:
+        if side == "BUY":
+            resp = client.place_order(
+                symbol, "BUY", "MARKET",
+                quantity=0,  # placeholder, overridden by quoteOrderQty
+                quoteOrderQty=round(float(quote_qty), 2),
+            )
+        else:
+            existing = fs.list_trading_positions(status="OPEN", limit_size=200)
+            pos = next((p for p in existing if str(p.get("symbol", "")).upper() == symbol), None)
+            if not pos:
+                return {"ok": False, "error": "no_open_position"}
+            qty_to_sell = _round_step(_safe_float(pos.get("qty"), 0), 0.000001)
+            if qty_to_sell <= 0:
+                return {"ok": False, "error": "zero_qty_position"}
+            resp = client.place_order(symbol, "SELL", "MARKET", quantity=qty_to_sell)
+
+        order_id = str(resp.get("orderId") or _dedupe_order_id(run_id, symbol, side, mode))
+        fills = resp.get("fills") or []
+        exec_price = _safe_float(fills[0].get("price") if fills else None, price)
+        exec_qty = _safe_float(resp.get("executedQty"), 0)
+
+        if side == "BUY":
+            stop_mult = _safe_float(((config.get("exit") or {}).get("stopAtrMult")), 1.5)
+            take_mult = _safe_float(((config.get("exit") or {}).get("takeAtrMult")), 2.5)
+            fs.upsert_trading_position(symbol, {
+                "symbol": symbol, "mode": mode, "status": "OPEN",
+                "qty": exec_qty, "avgEntry": exec_price, "lastPrice": exec_price,
+                "stopPrice": max(0.0, exec_price - stop_mult * atr),
+                "takePrice": exec_price + take_mult * atr,
+                "orderId": order_id, "openedAt": now, "updatedAt": now,
+                "source": "manual", "openedByUid": uid,
+            })
+        else:
+            fs.upsert_trading_position(symbol, {
+                "status": "CLOSED", "closedAt": now,
+                "closeReason": "MANUAL_SELL", "lastPrice": exec_price,
+                "pnlRealized": (exec_price - _safe_float((pos or {}).get("avgEntry"), exec_price)) * exec_qty,
+            })
+
+        fs.upsert_trading_order(order_id, {
+            "orderId": order_id, "symbol": symbol, "side": side,
+            "mode": mode, "status": "FILLED", "source": "manual",
+            "executedPrice": exec_price, "executedQty": exec_qty,
+            "openedByUid": uid, "createdAt": now,
+        })
+        log_event(logger, "manual_order_filled", uid=uid, symbol=symbol, side=side, mode=mode, price=exec_price)
+        return {"ok": True, "orderId": order_id, "mode": mode, "side": side,
+                "symbol": symbol, "executedPrice": exec_price, "qty": exec_qty,
+                "executedAt": now.isoformat()}
+
+    except Exception as exc:
+        log_event(logger, "manual_order_error", uid=uid, symbol=symbol, side=side, mode=mode, error=str(exc))
+        return {"ok": False, "error": str(exc), "mode": mode}
+
+
 def run_trade_pipeline() -> dict[str, Any]:
     settings = get_settings()
     fs = FirestoreNotificationStorage(settings.gcp_project_id)

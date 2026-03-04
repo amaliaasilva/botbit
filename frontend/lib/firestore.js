@@ -293,3 +293,19 @@ export function subscribeScoreUniverse(onData) {
     onData(snap.data());
   });
 }
+
+export function subscribeDiscoverSettings(onData) {
+  if (!db) return () => {};
+  const ref = doc(db, "config", "discover_settings");
+  return onSnapshot(ref, (snap) => {
+    onData(snap.exists() ? snap.data() : { topN: 20, rotateHours: 1 });
+  });
+}
+
+export function subscribeSystemStatus(jobName, onData) {
+  if (!db) return () => {};
+  const ref = doc(db, "system_status", jobName);
+  return onSnapshot(ref, (snap) => {
+    onData(snap.exists() ? snap.data() : null);
+  });
+}

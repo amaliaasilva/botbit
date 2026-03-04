@@ -220,15 +220,31 @@ export default function AssetDetailPanel({ open, symbol, quote, market, discover
 
   if (!open || !symbol) return null;
 
+  // ── Merged data: market takes priority, discover fills gaps ──────────────
   const keyMetrics = discover?.keyMetrics || {};
-  const score = Number(market?.score || 0);
-  const rsi = Number(market?.rsi14 || 0);
-  const atr = Number(market?.atr14 || 0);
-  const signalRaw = String(market?.signal || "WAIT").toUpperCase();
-  const chg24 = quote?.change24hPct != null ? Number(quote.change24hPct) : null;
-  const price = Number(quote?.price || 0);
+  const score     = Number(market?.score      || discover?.potentialScore || 0);
+  const rsi       = Number(market?.rsi14      || keyMetrics?.rsi14       || 0);
+  const atr       = Number(market?.atr14      || keyMetrics?.atr14       || 0);
+  const regime_   = market?.regime || discover?.regime || "N/A";
+  const signalRaw = String(market?.signal || discover?.signal || "WAIT").toUpperCase();
+  const chg24     = quote?.change24hPct != null ? Number(quote.change24hPct) : null;
+  const price     = Number(quote?.price || 0);
 
-  const explanation = buildExplanLevels({ symbol, market, discover, quote });
+  // Discover-only metrics (with market fallbacks when available)
+  const potentialScore = discover?.potentialScore    ?? market?.potentialScore    ?? null;
+  const volZ           = keyMetrics?.volume_z        ?? market?.volume_z          ?? null;
+  const corrBtc        = keyMetrics?.corr_btc        ?? market?.corr_btc          ?? null;
+
+  // Entry / exit suggestions
+  const stopPrice   = price > 0 && atr > 0 ? price - atr * 1.5 : null;
+  const targetPrice = price > 0 && atr > 0 ? price + atr * 3   : null;
+
+  const explanation = buildExplanLevels({
+    symbol,
+    market: market || { score, rsi14: rsi, atr14: atr, regime: regime_, signal: signalRaw },
+    discover,
+    quote,
+  });
 
   return (
     <div className="asset-panel-overlay" onClick={onClose}>
@@ -269,7 +285,7 @@ export default function AssetDetailPanel({ open, symbol, quote, market, discover
             </div>
             <div className="kpi-card">
               <span className="kpi-card-label">Regime</span>
-              <span className="kpi-card-value" style={{ fontSize: "var(--fs-lg)" }}>{market?.regime || "N/A"}</span>
+              <span className="kpi-card-value" style={{ fontSize: "var(--fs-lg)" }}>{regime_}</span>
             </div>
           </div>
 
@@ -279,7 +295,7 @@ export default function AssetDetailPanel({ open, symbol, quote, market, discover
             <ul style={{ margin: 0, paddingLeft: 18, fontSize: "var(--fs-sm)", color: "var(--text-secondary)", lineHeight: 1.7 }}>
               <li>Score {score}/100: {scoreInterpret(score)}.</li>
               <li>RSI {rsiInterpret(rsi)}.</li>
-              <li>{friendlyRegime(market?.regime)} — {signalRaw === "BUY" ? "favorece entrada" : signalRaw === "SELL" ? "favorece saída" : "não favorece operação"}.</li>
+              <li>{friendlyRegime(regime_)} — {signalRaw === "BUY" ? "favorece entrada" : signalRaw === "SELL" ? "favorece saída" : "não favorece operação"}.</li>
             </ul>
           </div>
 
@@ -310,12 +326,66 @@ export default function AssetDetailPanel({ open, symbol, quote, market, discover
             </div>
           </div>
 
-          {/* ── Seção 5: O que fazer agora ── */}
+          {/* ── Seção 5: Sugestão de entrada / saída ── */}
           <div className="decision-section" style={{ background: "var(--surface2)" }}>
             <div className="decision-section-title"><span>💡</span> O que fazer agora</div>
-            <p style={{ margin: 0, fontSize: "var(--fs-base)", color: "var(--text)", lineHeight: 1.6, fontWeight: 500 }}>
+            <p style={{ margin: 0, marginBottom: 12, fontSize: "var(--fs-base)", color: "var(--text)", lineHeight: 1.6, fontWeight: 500 }}>
               {signalAction(signalRaw)}
             </p>
+            {/* Sugestão de entrada */}
+            {signalRaw === "BUY" && price > 0 && (
+              <div style={{ background: "var(--surface)", borderRadius: 8, padding: "10px 14px", marginBottom: 8, fontSize: "var(--fs-sm)" }}>
+                <div style={{ fontWeight: 700, color: "var(--good)", marginBottom: 4 }}>📥 Sugestão de entrada</div>
+                <div className="row">
+                  <span style={{ color: "var(--muted)" }}>Preço de entrada</span>
+                  <span className="mono">{metricValue(price, price >= 1 ? 2 : 6)} (mercado)</span>
+                </div>
+                {stopPrice != null && (
+                  <div className="row">
+                    <span style={{ color: "var(--muted)" }}>Stop loss (1.5× ATR)</span>
+                    <span className="mono" style={{ color: "var(--danger)" }}>{metricValue(stopPrice, price >= 1 ? 2 : 6)}</span>
+                  </div>
+                )}
+                {targetPrice != null && (
+                  <div className="row">
+                    <span style={{ color: "var(--muted)" }}>Alvo (3× ATR, R:R 2:1)</span>
+                    <span className="mono" style={{ color: "var(--good)" }}>{metricValue(targetPrice, price >= 1 ? 2 : 6)}</span>
+                  </div>
+                )}
+                <button
+                  className="btn btn-primary"
+                  style={{ marginTop: 10, width: "100%", opacity: 0.5, cursor: "not-allowed" }}
+                  disabled
+                  title="Em breve — requer ativação de ordens no backend"
+                >
+                  🟢 Executar Compra (em breve)
+                </button>
+              </div>
+            )}
+            {/* Sugestão de saída */}
+            {signalRaw === "SELL" && price > 0 && (
+              <div style={{ background: "var(--surface)", borderRadius: 8, padding: "10px 14px", fontSize: "var(--fs-sm)" }}>
+                <div style={{ fontWeight: 700, color: "var(--danger)", marginBottom: 4 }}>📤 Sugestão de saída</div>
+                <div className="row">
+                  <span style={{ color: "var(--muted)" }}>Preço de saída</span>
+                  <span className="mono">{metricValue(price, price >= 1 ? 2 : 6)} (mercado)</span>
+                </div>
+                {stopPrice != null && (
+                  <div className="row">
+                    <span style={{ color: "var(--muted)" }}>Stop de proteção</span>
+                    <span className="mono" style={{ color: "var(--danger)" }}>{metricValue(stopPrice, price >= 1 ? 2 : 6)}</span>
+                  </div>
+                )}
+                <button
+                  className="btn"
+                  style={{ marginTop: 10, width: "100%", background: "var(--danger)", opacity: 0.5, cursor: "not-allowed" }}
+                  disabled
+                  title="Em breve — requer ativação de ordens no backend"
+                >
+                  🔴 Executar Venda (em breve)
+                </button>
+              </div>
+            )}
           </div>
 
           {/* ── Seção 6: IA — Por quê? ── */}
@@ -350,20 +420,31 @@ export default function AssetDetailPanel({ open, symbol, quote, market, discover
             <div className="kpi-grid">
               <div className="kpi-card">
                 <span className="kpi-card-label">Potential</span>
-                <span className="kpi-card-value" style={{ fontSize: "var(--fs-lg)" }}>{metricValue(discover?.potentialScore, 0)}/100</span>
+                <span className="kpi-card-value" style={{ fontSize: "var(--fs-lg)", color: potentialScore >= 60 ? "var(--good)" : potentialScore >= 35 ? "var(--warn)" : "var(--muted)" }}>
+                  {potentialScore != null ? `${metricValue(potentialScore, 0)}/100` : "—"}
+                </span>
+                <span className="kpi-card-hint">{potentialScore == null ? "Sem dados Discover" : potentialScore >= 60 ? "alto" : potentialScore >= 35 ? "moderado" : "baixo"}</span>
               </div>
               <div className="kpi-card">
                 <span className="kpi-card-label">Vol Z</span>
                 <span className="kpi-card-value" style={{
                   fontSize: "var(--fs-lg)",
-                  color: Number(keyMetrics?.volume_z || 0) >= 1.5 ? "var(--good)" : Number(keyMetrics?.volume_z || 0) <= -0.5 ? "var(--danger)" : "var(--muted)"
+                  color: volZ == null ? "var(--muted)" : Number(volZ) >= 1.5 ? "var(--good)" : Number(volZ) <= -0.5 ? "var(--danger)" : "var(--muted)"
                 }}>
-                  {metricValue(keyMetrics?.volume_z)}
+                  {volZ != null ? metricValue(volZ) : "—"}
                 </span>
+                {volZ != null && (
+                  <span className="kpi-card-hint">{Number(volZ) >= 1.5 ? "acima da média" : Number(volZ) <= -0.5 ? "fraco" : "normal"}</span>
+                )}
               </div>
               <div className="kpi-card">
                 <span className="kpi-card-label">Corr BTC</span>
-                <span className="kpi-card-value" style={{ fontSize: "var(--fs-lg)" }}>{metricValue(keyMetrics?.corr_btc)}</span>
+                <span className="kpi-card-value" style={{ fontSize: "var(--fs-lg)", color: corrBtc == null ? "var(--muted)" : Math.abs(Number(corrBtc)) >= 0.6 ? "var(--warn)" : "var(--text)" }}>
+                  {corrBtc != null ? metricValue(corrBtc) : "—"}
+                </span>
+                {corrBtc != null && (
+                  <span className="kpi-card-hint">{Math.abs(Number(corrBtc)) >= 0.6 ? "alta correlação" : Math.abs(Number(corrBtc)) >= 0.3 ? "moderada" : "independente"}</span>
+                )}
               </div>
             </div>
           </div>

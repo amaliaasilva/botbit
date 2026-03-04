@@ -13,9 +13,11 @@ import {
   listMarketScores,
   removeWatchlistSymbol,
   subscribeDiscoverLatest,
+  subscribeDiscoverSettings,
   subscribeMarketRanking,
   subscribeQuotes,
   subscribeScoreUniverse,
+  subscribeSystemStatus,
   subscribeTradingState,
   subscribeWatchlist,
 } from "../../lib/firestore";
@@ -137,6 +139,7 @@ function MercadoTab() {
   const [selectedSymbol, setSelectedSymbol] = useState("BTCUSDT");
   const [tradingState, setTradingState] = useState(null);
   const [discoverMap, setDiscoverMap] = useState({});
+  const [detailDiscover, setDetailDiscover] = useState(null);
   const [scoreUniverse, setScoreUniverse] = useState(null);
 
   useEffect(() => {
@@ -148,6 +151,18 @@ function MercadoTab() {
   }, []);
 
   useEffect(() => { return subscribeScoreUniverse((d) => setScoreUniverse(d)); }, []);
+
+  /* Fetch discover for the clicked symbol (may not be in bulk discoverMap) */
+  useEffect(() => {
+    if (!detailSymbol) { setDetailDiscover(null); return; }
+    if (discoverMap[detailSymbol]) { setDetailDiscover(discoverMap[detailSymbol]); return; }
+    let cancelled = false;
+    listDiscoverScores([detailSymbol]).then((rows) => {
+      if (cancelled) return;
+      setDetailDiscover(rows.find((r) => r.symbol === detailSymbol) || null);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [detailSymbol, discoverMap]);
 
   /* Load discover data for ranking symbols whenever ranking updates */
   useEffect(() => {
@@ -379,7 +394,7 @@ function MercadoTab() {
         symbol={detailSymbol}
         quote={quotesMap[detailSymbol] || null}
         market={ranking.find((r) => r.symbol === detailSymbol) || null}
-        discover={discoverMap[detailSymbol] || null}
+        discover={detailDiscover}
         onClose={() => setDetailSymbol("")}
       />
     </>
@@ -627,8 +642,13 @@ function DiscoverTab({ uid }) {
   const [detailSymbol, setDetailSymbol] = useState("");
   const [watchlistSymbols, setWatchlistSymbols] = useState([]);
   const [actionMsg, setActionMsg] = useState("");
+  const [discoverSettings, setDiscoverSettings] = useState({ topN: 20, rotateHours: 1 });
+  const [cronDiscoverStatus, setCronDiscoverStatus] = useState(null);
 
-  useEffect(() => { return subscribeDiscoverLatest(50, (rows) => setItems(rows)); }, []);
+  useEffect(() => subscribeDiscoverSettings((s) => setDiscoverSettings(s || { topN: 20, rotateHours: 1 })), []);
+  useEffect(() => subscribeSystemStatus("cron_discover", setCronDiscoverStatus), []);
+
+  useEffect(() => { return subscribeDiscoverLatest(discoverSettings.topN, (rows) => setItems(rows)); }, [discoverSettings.topN]);
 
   useEffect(() => {
     if (!uid) return () => {};
@@ -679,7 +699,15 @@ function DiscoverTab({ uid }) {
         </div>
         {actionMsg ? <div className="action-msg" style={{ marginBottom: 8 }}>{actionMsg}</div> : null}
         <p className="settings-help" style={{ marginBottom: 10 }}>
-          O Discover escaneia os top 50 por volume da Binance a cada 6h. Os melhores alimentam o Score Universe que o trading usa para decidir.
+          O Discover escaneia os <strong>top {discoverSettings.topN}</strong> por volume da Binance a cada{" "}
+          <strong>{discoverSettings.rotateHours}h</strong>. Os melhores alimentam o Score Universe que o trading usa para decidir.
+          {cronDiscoverStatus && (
+            <span style={{ marginLeft: 8, color: cronDiscoverStatus.ok ? "var(--accent)" : "#f87171", fontSize: "0.82rem" }}>
+              ● última run: {cronDiscoverStatus.last_cron_ok_at
+                ? new Date(cronDiscoverStatus.last_cron_ok_at).toLocaleTimeString("pt-BR")
+                : "—"}{" "}({cronDiscoverStatus.universeCount ?? "?"} universe)
+            </span>
+          )}
         </p>
         <div className="filter-row">
           <div className="filter-group">
@@ -793,7 +821,18 @@ function DiscoverTab({ uid }) {
         open={Boolean(detailSymbol)}
         symbol={detailSymbol}
         quote={quotesMap[detailSymbol] || null}
-        market={null}
+        market={(() => {
+          const d = items.find((r) => r.symbol === detailSymbol);
+          if (!d) return null;
+          return {
+            score:  d.potentialScore || 0,
+            signal: d.signal   || "WAIT",
+            regime: d.regime   || "Neutro",
+            rsi14:  d.keyMetrics?.rsi14 || 0,
+            atr14:  d.keyMetrics?.atr14 || 0,
+            explanation: d.explanation || "",
+          };
+        })()}
         discover={items.find((r) => r.symbol === detailSymbol) || null}
         onClose={() => setDetailSymbol("")}
       />

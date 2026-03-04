@@ -185,6 +185,46 @@ class FirestoreNotificationStorage:
         )
         return [doc.to_dict() for doc in query.stream()]
 
+    def list_discover_top_public(self, limit_size: int = 50) -> list[dict[str, Any]]:
+        """Reads public/discover_top/items ordered by potentialScore."""
+        query = (
+            self.client.collection("public").document("discover_top").collection("items")
+            .order_by("potentialScore", direction=firestore.Query.DESCENDING)
+            .limit(max(1, limit_size))
+        )
+        return [doc.to_dict() for doc in query.stream()]
+
+    def list_user_watchlist(self, uid: str) -> list[str]:
+        """Return list of symbols from users/{uid}/watchlist."""
+        if not uid:
+            return []
+        docs = self.client.collection("users").document(uid).collection("watchlist").stream()
+        return [str(d.to_dict().get("symbol") or d.id).upper() for d in docs]
+
+    def get_discover_settings(self) -> dict[str, Any]:
+        """Read config/discover_settings; returns defaults if not found."""
+        defaults: dict[str, Any] = {"topN": 20, "rotateHours": 1}
+        snap = self.client.collection("config").document("discover_settings").get()
+        if snap.exists:
+            remote = snap.to_dict() or {}
+            for key, default_val in defaults.items():
+                if key in remote:
+                    try:
+                        defaults[key] = type(default_val)(remote[key])
+                    except (TypeError, ValueError):
+                        pass
+        return defaults
+
+    def delete_stale_discover_docs(self, valid_symbols: list[str]) -> int:
+        """Remove docs from public/discover_top/items not in valid_symbols."""
+        valid_set = {s.upper() for s in valid_symbols}
+        deleted = 0
+        for doc in self.client.collection("public").document("discover_top").collection("items").stream():
+            if doc.id not in valid_set:
+                doc.reference.delete()
+                deleted += 1
+        return deleted
+
     def list_market_latest(self, limit_size: int = 100) -> list[dict[str, Any]]:
         query = (
             self.client.collection("market_latest")
@@ -212,7 +252,7 @@ class FirestoreNotificationStorage:
                     "mode": "PAPER",
                     "ownerUid": owner_uid,
                     "exchange": "BINANCE",
-                    "symbolsUniverse": "DISCOVER_TOP50",
+                    "symbolsUniverse": "SCORE_UNIVERSE",
                     "fixedSymbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
                     "timeframe": "4h",
                     "cooldownHours": 24,

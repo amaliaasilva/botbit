@@ -171,6 +171,8 @@ def _rotate_score_universe(
     fs_storage: FirestoreNotificationStorage,
     discover_items: list[dict[str, Any]],
     settings: Any,
+    *,
+    rotate_hours_override: int | None = None,
 ) -> None:
     """Rotate config/score_universe_current using discover results.
 
@@ -178,7 +180,7 @@ def _rotate_score_universe(
     Always ensures BTCUSDT is included as the first symbol.
     """
     size = settings.score_universe_size  # default 30
-    rotate_hours = settings.score_universe_rotate_hours  # default 12
+    rotate_hours = rotate_hours_override if rotate_hours_override is not None else settings.score_universe_rotate_hours
 
     existing = fs_storage.get_score_universe()
     if existing:
@@ -234,6 +236,11 @@ def run_discover_pipeline() -> dict[str, Any]:
     fs_storage = FirestoreNotificationStorage(settings.gcp_project_id)
     binance = BinanceClient()
 
+    # Load configurable discover settings from Firestore
+    discover_cfg = fs_storage.get_discover_settings()
+    top_n = int(discover_cfg.get("topN") or 20)
+    rotate_hours = int(discover_cfg.get("rotateHours") or 1)
+
     run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
     started_at = datetime.utcnow()
 
@@ -261,7 +268,8 @@ def run_discover_pipeline() -> dict[str, Any]:
             log_event(logger, "discover_symbol_error", symbol=symbol, error=str(exc))
 
     items.sort(key=lambda row: row["potentialScore"], reverse=True)
-    top = items[:20]
+    top = items[:top_n]
+    top_symbols = [str(row["symbol"]).upper() for row in top]
 
     date_key = datetime.utcnow().strftime("%Y-%m-%d")
     for row in items:
@@ -269,8 +277,28 @@ def run_discover_pipeline() -> dict[str, Any]:
     for row in top:
         fs_storage.upsert_discovery_top_item(date_key, row["symbol"], row)
 
+    # Remove stale docs from public/discover_top/items
+    try:
+        stale_deleted = fs_storage.delete_stale_discover_docs(top_symbols)
+        if stale_deleted:
+            log_event(logger, "stale_discover_docs_cleaned", deleted=stale_deleted)
+    except Exception as exc:
+        log_event(logger, "stale_discover_clean_error", error=str(exc))
+
     # ── Rotate Score Universe ─────────────────────────────────────────────
-    _rotate_score_universe(fs_storage, items, settings)
+    _rotate_score_universe(fs_storage, items, settings, rotate_hours_override=rotate_hours)
+
+    ok = failures == 0
+    result = {
+        "ok": ok,
+        "runId": run_id,
+        "universeCount": len(universe),
+        "candidateCount": len(candidates),
+        "topCount": len(top),
+        "topN": top_n,
+        "rotateHours": rotate_hours,
+        "failed": failures,
+    }
 
     fs_storage.upsert_discovery_run(
         run_id,
@@ -280,19 +308,27 @@ def run_discover_pipeline() -> dict[str, Any]:
             "universeCount": len(universe),
             "candidateCount": len(candidates),
             "topCount": len(top),
+            "topN": top_n,
             "errorsCount": failures,
-            "status": "ok" if failures == 0 else "partial",
+            "status": "ok" if ok else "partial",
         },
     )
 
-    return {
-        "ok": failures == 0,
-        "runId": run_id,
-        "universeCount": len(universe),
-        "candidateCount": len(candidates),
-        "topCount": len(top),
-        "failed": failures,
-    }
+    # ── system_status/cron_discover ───────────────────────────────────────
+    fs_storage.upsert_system_status(
+        "cron_discover",
+        {
+            "ok": ok,
+            "updated": len(top),
+            "failed": failures,
+            "topN": top_n,
+            "rotateHours": rotate_hours,
+            "universeCount": len(universe),
+            "last_cron_ok_at": datetime.utcnow(),
+        },
+    )
+
+    return result
 
 
 def get_discover_latest(limit_size: int = 20) -> list[dict[str, Any]]:
