@@ -7,7 +7,7 @@ import { getUserSettings, updateUserSettings } from "../../lib/firestore";
 import { useRouter } from "next/navigation";
 import AppShell from "../../components/AppShell";
 import { emergencyStopTrading, subscribeTradingConfig, subscribeTradingState, updateTradingConfig, subscribeExecutorStatus, subscribePendingIntents } from "../../lib/firestore";
-import { fetchBinanceValidate } from "../../lib/backend";
+import { fetchBinanceValidate, fetchLiveGateStatus } from "../../lib/backend";
 
 const TABS = [
   { id: "profile", label: "Perfil", hint: "Notificações e preferências" },
@@ -53,6 +53,9 @@ export default function SettingsPage() {
   const [pendingIntents, setPendingIntents] = useState([]);
   const [binanceValidation, setBinanceValidation] = useState(null);
   const [binanceValidating, setBinanceValidating] = useState(false);
+  const [gateStatus, setGateStatus] = useState(null);
+  const [gateLoading, setGateLoading] = useState(false);
+  const [showLiveConfirm, setShowLiveConfirm] = useState(false);
 
   const [costData, setCostData] = useState(null);
   const [costLoading, setCostLoading] = useState(false);
@@ -149,6 +152,25 @@ export default function SettingsPage() {
     } finally {
       setBinanceValidating(false);
     }
+  }
+
+  async function loadGateStatus() {
+    setGateLoading(true);
+    try {
+      const res = await fetchLiveGateStatus();
+      setGateStatus(res);
+    } catch (e) {
+      setGateStatus({ error: e.message });
+    } finally {
+      setGateLoading(false);
+    }
+  }
+
+  async function setLiveModeConfirmed() {
+    // Sets mode=LIVE only after explicit double-confirmation
+    await saveTradingPatch({ mode: "LIVE" });
+    setShowLiveConfirm(false);
+    await loadGateStatus();
   }
 
   const loadCosts = useCallback(async () => {
@@ -362,62 +384,159 @@ python tools/testnet_executor.py`}</pre>
             </div>
           )}
 
+          {/* ── Escolha do modo (com guarda LIVE) ── */}
           <div className="card" style={{ marginTop: 12 }}>
-            <div className="card-title"><strong>Escolha do modo</strong><span className="chip">Passo a passo</span></div>
-            <div className="settings-actions-wrap">
-              <button className="btn" onClick={() => setTradingMode("PAPER")}>PAPER (simulação segura)</button>
-              <button className="btn" onClick={() => setTradingMode("TESTNET")}>TESTNET (teste realista)</button>
-              <button className="btn" onClick={() => setTradingMode("LIVE")}>LIVE (produção)</button>
+            <div className="card-title">
+              <strong>Escolha do modo</strong>
+              <span className={`chip badge ${
+                tradingConfig?.mode === "LIVE" ? "avoid"
+                : tradingConfig?.mode === "TESTNET" ? "buy"
+                : "wait"
+              }`}>{tradingConfig?.mode || "PAPER"}</span>
             </div>
-            <p className="settings-help">Modo atual: <strong>{tradingConfig?.mode || "PAPER"}</strong></p>
+            <div className="settings-actions-wrap">
+              <button className="btn" onClick={() => saveTradingPatch({ mode: "PAPER" })}>PAPER (simulação segura)</button>
+              <button className="btn" onClick={() => saveTradingPatch({ mode: "TESTNET" })}>TESTNET (teste realista)</button>
+              <button
+                className="btn"
+                style={{ color: "#FCA5A5", borderColor: "rgba(239,68,68,.4)", background: "rgba(239,68,68,.1)" }}
+                onClick={() => setShowLiveConfirm(true)}
+              >
+                ⚠️ LIVE (dinheiro real)
+              </button>
+            </div>
+            {showLiveConfirm && (
+              <div style={{
+                marginTop: 14, padding: "16px",
+                background: "rgba(239,68,68,.1)",
+                border: "1px solid rgba(239,68,68,.4)",
+                borderRadius: 8,
+              }}>
+                <p style={{ margin: "0 0 10px", fontWeight: 700, color: "#FCA5A5", fontSize: "var(--fs-sm)" }}>
+                  ⚠️ Você está ativando o modo LIVE. Isso permite execuções com dinheiro real na Binance.
+                  O bot APENAS operará se os 4 gates abaixo estiverem abertos.
+                </p>
+                <p style={{ margin: "0 0 12px", fontSize: "var(--fs-xs)", color: "var(--muted)" }}>
+                  Mudar o modo para LIVE NOT abre os gates automáticos — você ainda precisa confirmar o Gate 2
+                  e o operador precisa armar os secrets no Cloud Run.
+                </p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    className="btn"
+                    style={{ color: "#FCA5A5", borderColor: "rgba(239,68,68,.4)", background: "rgba(239,68,68,.15)" }}
+                    onClick={setLiveModeConfirmed}
+                  >
+                    Confirmar: definir modo LIVE
+                  </button>
+                  <button className="btn" onClick={() => setShowLiveConfirm(false)}>Cancelar</button>
+                </div>
+              </div>
+            )}
+            <p className="settings-help" style={{ marginTop: 10 }}>
+              Modo LIVE ativo nunca executa ordens automaticamente sem todos os gates abertos.
+              Mesmo com modo=LIVE, o backend bloqueia se os secrets não estiverem configurados.
+            </p>
           </div>
 
-          {/* ── 3 gates de proteção LIVE ── */}
+          {/* ── Gates de proteção LIVE ── */}
           <div className="card" style={{ marginTop: 12 }}>
-            <div className="card-title"><strong>Gates de proteção LIVE</strong><span className="chip">3 confirmações</span></div>
+            <div className="card-title">
+              <strong>Gates de proteção LIVE</strong>
+              {gateStatus?.ok
+                ? <span className="chip badge buy">✓ TODOS ABERTOS — CUIDADO</span>
+                : <span className="chip badge wait">Bloqueado — sem risco</span>}
+              <button className="btn" onClick={loadGateStatus} disabled={gateLoading}
+                style={{ padding: "3px 10px", fontSize: "var(--fs-xs)", marginLeft: "auto" }}>
+                {gateLoading ? "⏳" : "↺ Verificar"}
+              </button>
+            </div>
             <p className="settings-help">
-              O robô só executa ordens LIVE se os 3 gates abaixo estiverem abertos.
-              Isso evita execuções acidentais em dinheiro real.
+              O bot executa ordens LIVE SOMENTE se os 4 checks abaixo passarem simultaneamente.
+              Clique em ↺ Verificar para ver o status real diretamente do servidor.
             </p>
-            {/* Gate 1 */}
-            <div className="row" style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.07)" }}>
-              <div>
-                <span style={{ fontWeight: 700, color: "var(--text)" }}>Gate 1 — Trading ativado</span>
-                <p className="settings-help" style={{ margin: "2px 0 0" }}>O switch de enabled/disabled precisa estar ON.</p>
+
+            {gateStatus?.error && (
+              <p style={{ color: "var(--danger)", fontSize: "var(--fs-sm)" }}>Erro: {gateStatus.error}</p>
+            )}
+
+            {gateStatus && !gateStatus.error && (() => {
+              const g = gateStatus.gates || {};
+              const GateRow = ({ label, ok, detail }) => (
+                <div className="row" style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.07)", alignItems: "flex-start" }}>
+                  <div>
+                    <span style={{ fontWeight: 700, color: "var(--text)" }}>{label}</span>
+                    {detail && <p className="settings-help" style={{ margin: "2px 0 0" }}>{detail}</p>}
+                  </div>
+                  <span className={`chip badge ${ok ? "buy" : "avoid"}`} style={{ flexShrink: 0 }}>
+                    {ok ? "✓ Aberto" : "✗ Fechado"}
+                  </span>
+                </div>
+              );
+              return (
+                <>
+                  <GateRow
+                    label="Gate 1A — Trading ativado (enabled)"
+                    ok={g.g1_enabled}
+                    detail="O switch enabled precisa estar ON no Firestore."
+                  />
+                  <GateRow
+                    label="Gate 1B — Modo definido como LIVE"
+                    ok={g.g1_mode_live}
+                    detail={`Modo atual: ${gateStatus.mode}`}
+                  />
+                  <GateRow
+                    label="Gate 2A — Confirmação LIVE digitada"
+                    ok={g.g2_confirmed && g.g2_text_ok}
+                    detail="liveGuard.liveConfirmed=true e texto digitado correto."
+                  />
+                  <GateRow
+                    label={`Gate 2B — Cooldown de ${g.g2_cooldown_remaining_minutes != null ? Math.ceil(g.g2_cooldown_remaining_minutes) : 5} min decorrido`}
+                    ok={g.g2_cooldown_ok}
+                    detail={g.g2_cooldown_remaining_minutes > 0
+                      ? `Aguardando ${Math.ceil(g.g2_cooldown_remaining_minutes)} min após confirmação.`
+                      : "Cooldown já decorrido."}
+                  />
+                  <GateRow
+                    label="Gate 3 — Secret LIVE_TRADING_ENABLED no Cloud Run"
+                    ok={g.g3_feature_flag_enabled}
+                    detail={'Secret LIVE_TRADING_ENABLED="true" deve estar no Cloud Run. Controlado pelo operador via gcloud.'}
+                  />
+                  <GateRow
+                    label="Gate 4 — Secret LIVE_TRADING_ARMED no Cloud Run"
+                    ok={g.g4_armed}
+                    detail={'Secret LIVE_TRADING_ARMED="YES_I_KNOW_WHAT_IM_DOING" deve estar no Cloud Run. Última barreira — sem ela nenhuma ordem LIVE é enviada.'}
+                  />
+                </>
+              );
+            })()}
+
+            {/* Sem status ainda */}
+            {!gateStatus && (
+              <p style={{ color: "var(--muted)", fontSize: "var(--fs-sm)" }}>
+                Clique em ↺ Verificar para consultar o status real dos gates no servidor.
+              </p>
+            )}
+
+            {/* Confirmar Gate 2 */}
+            <div style={{ marginTop: 16, borderTop: "1px solid rgba(255,255,255,.07)", paddingTop: 14 }}>
+              <strong style={{ fontSize: "var(--fs-sm)", color: "var(--text)" }}>Confirmar Gate 2 — digite LIVE e confirme</strong>
+              <p className="settings-help">Inicia o cooldown de 5 minutos. Após isso o check Gate 2B passa automaticamente.</p>
+              <div className="row" style={{ marginTop: 8 }}>
+                <input
+                  value={confirmText}
+                  onChange={(e) => setConfirmText(e.target.value)}
+                  placeholder="Digite LIVE aqui"
+                  style={{ border: confirmText.toUpperCase() === "LIVE" ? "1px solid rgba(239,68,68,.5)" : undefined }}
+                />
+                <button
+                  className="btn"
+                  style={{ color: "#FCA5A5", borderColor: "rgba(239,68,68,.4)", background: "rgba(239,68,68,.1)" }}
+                  onClick={async () => { await confirmLiveMode(); setTimeout(loadGateStatus, 500); }}
+                  disabled={confirmText.toUpperCase() !== "LIVE"}
+                >
+                  Confirmar Gate 2
+                </button>
               </div>
-              <span className={`chip badge ${tradingConfig?.enabled ? "buy" : "avoid"}`}>
-                {tradingConfig?.enabled ? "✓ Aberto" : "✗ Fechado"}
-              </span>
-            </div>
-            {/* Gate 2 */}
-            <div className="row" style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.07)" }}>
-              <div>
-                <span style={{ fontWeight: 700, color: "var(--text)" }}>Gate 2 — Confirmação LIVE no frontend</span>
-                <p className="settings-help" style={{ margin: "2px 0 0" }}>Você precisa digitar <strong>LIVE</strong> abaixo e confirmar.</p>
-              </div>
-              <span className={`chip badge ${tradingConfig?.liveGuard?.liveConfirmed ? "buy" : "wait"}`}>
-                {tradingConfig?.liveGuard?.liveConfirmed ? "✓ Confirmado" : "Pendente"}
-              </span>
-            </div>
-            {/* Gate 3 */}
-            <div className="row" style={{ padding: "10px 0" }}>
-              <div>
-                <span style={{ fontWeight: 700, color: "var(--text)" }}>Gate 3 — Secret LIVE_TRADING_ARMED</span>
-                <p className="settings-help" style={{ margin: "2px 0 0" }}>
-                  Secret de sistema no Cloud Run. Controlado pelo operador — não é editável aqui.
-                  Se não estiver configurado, o backend bloqueia mesmo que Gate 1 e 2 estejam abertos.
-                </p>
-              </div>
-              <span className="chip badge wait">Servidor</span>
-            </div>
-            {/* Ação gate 2 */}
-            <div className="row" style={{ marginTop: 12 }}>
-              <input
-                value={confirmText}
-                onChange={(e) => setConfirmText(e.target.value)}
-                placeholder="Digite LIVE para confirmar gate 2"
-              />
-              <button className="btn" onClick={confirmLiveMode}>Confirmar LIVE (Gate 2)</button>
             </div>
           </div>
 

@@ -123,3 +123,7 @@ export async function fetchBinanceValidate() {
 export async function fetchExecutorApiStatus() {
   return getJson("/internal/executor/status", true);
 }
+
+export async function fetchLiveGateStatus() {
+  return getJson("/api/trading/live-gate-status", true);
+}

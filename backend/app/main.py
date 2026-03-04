@@ -16,7 +16,7 @@ from app.sources.binance import BinanceClient
 from app.sources.binance_trade import BinanceTradeClient
 from app.storage.bigquery_client import BigQueryStorage
 from app.storage.firestore_client import FirestoreNotificationStorage
-from app.trading import run_trade_pipeline
+from app.trading import run_trade_pipeline, _live_gate_ok, _parse_ts, _now
 
 app = FastAPI(title="Market AI Scoring", version="1.0.0")
 
@@ -310,6 +310,56 @@ def get_trade_intents(
     fs = FirestoreNotificationStorage(settings.gcp_project_id)
     intents = fs.list_trade_intents(limit_size=limit, status=status or None)
     return {"intents": intents, "total": len(intents)}
+
+
+@app.get("/api/trading/live-gate-status")
+def api_trading_live_gate_status(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
+    """Retorna status real de cada gate de proteção LIVE sem expor valores dos secrets."""
+    settings = get_settings()
+    fs = FirestoreNotificationStorage(settings.gcp_project_id)
+    config = fs.get_trading_config()
+    guard = config.get("liveGuard") or {}
+
+    # Check each gate individually
+    g1_enabled = bool(config.get("enabled", False))
+    g1_mode_live = str(config.get("mode") or "").upper() == "LIVE"
+
+    confirm_text = str(guard.get("doubleConfirmText") or "LIVE").upper()
+    typed = str(guard.get("typedText") or "").upper()
+    g2_confirmed = bool(guard.get("liveConfirmed", False))
+    g2_text_ok = typed == confirm_text
+
+    cooldown_minutes = int(guard.get("cooldownMinutes") or 5)
+    cooldown_remaining = 0.0
+    confirmed_at = _parse_ts(guard.get("liveConfirmedAt"))
+    if confirmed_at:
+        elapsed = (_now() - confirmed_at).total_seconds() / 60.0
+        cooldown_remaining = max(0.0, cooldown_minutes - elapsed)
+    g2_cooldown_ok = confirmed_at is not None and cooldown_remaining == 0.0
+
+    g3_feature_flag = str(get_secret("LIVE_TRADING_ENABLED") or "false").lower() == "true"
+    armed_secret = str(get_secret("LIVE_TRADING_ARMED") or "").strip()
+    g4_armed = armed_secret == "YES_I_KNOW_WHAT_IM_DOING"
+
+    gate_ok, gate_reason = _live_gate_ok(config)
+
+    return {
+        "ok": gate_ok,
+        "reason": gate_reason,
+        "mode": str(config.get("mode") or "PAPER").upper(),
+        "enabled": g1_enabled,
+        "cooldownRemainingMinutes": round(cooldown_remaining, 1),
+        "gates": {
+            "g1_enabled": g1_enabled,
+            "g1_mode_live": g1_mode_live,
+            "g2_confirmed": g2_confirmed,
+            "g2_text_ok": g2_text_ok,
+            "g2_cooldown_ok": g2_cooldown_ok,
+            "g2_cooldown_remaining_minutes": round(cooldown_remaining, 1),
+            "g3_feature_flag_enabled": g3_feature_flag,
+            "g4_armed": g4_armed,
+        },
+    }
 
 
 @app.post("/api/trading/emergency-stop")
