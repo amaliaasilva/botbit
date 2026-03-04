@@ -7,6 +7,7 @@ import { getUserSettings, updateUserSettings } from "../../lib/firestore";
 import { useRouter } from "next/navigation";
 import AppShell from "../../components/AppShell";
 import { emergencyStopTrading, subscribeTradingConfig, subscribeTradingState, updateTradingConfig, subscribeExecutorStatus, subscribePendingIntents } from "../../lib/firestore";
+import { fetchBinanceValidate } from "../../lib/backend";
 
 const TABS = [
   { id: "profile", label: "Perfil", hint: "Notificações e preferências" },
@@ -50,6 +51,8 @@ export default function SettingsPage() {
   const [tradingMessage, setTradingMessage] = useState("");
   const [executorStatus, setExecutorStatus] = useState(null);
   const [pendingIntents, setPendingIntents] = useState([]);
+  const [binanceValidation, setBinanceValidation] = useState(null);
+  const [binanceValidating, setBinanceValidating] = useState(false);
 
   const [costData, setCostData] = useState(null);
   const [costLoading, setCostLoading] = useState(false);
@@ -131,6 +134,21 @@ export default function SettingsPage() {
     await emergencyStopTrading();
     setTradingMessage("Emergency Stop aplicado com sucesso");
     setTimeout(() => setTradingMessage(""), 2000);
+  }
+
+  async function validateBinance() {
+    setBinanceValidating(true);
+    setBinanceValidation(null);
+    try {
+      const res = await fetchBinanceValidate();
+      setBinanceValidation({ ok: true, ...res });
+    } catch (e) {
+      let detail = e.message;
+      try { detail = JSON.parse(e.message.replace(/^Backend \d+: /, ""))?.message || detail; } catch {}
+      setBinanceValidation({ ok: false, error: detail });
+    } finally {
+      setBinanceValidating(false);
+    }
   }
 
   const loadCosts = useCallback(async () => {
@@ -351,10 +369,91 @@ python tools/testnet_executor.py`}</pre>
               <button className="btn" onClick={() => setTradingMode("TESTNET")}>TESTNET (teste realista)</button>
               <button className="btn" onClick={() => setTradingMode("LIVE")}>LIVE (produção)</button>
             </div>
-            <div className="row" style={{ marginTop: 12 }}>
-              <input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="Para liberar LIVE, digite LIVE" />
-              <button className="btn" onClick={confirmLiveMode}>Confirmar modo LIVE</button>
+            <p className="settings-help">Modo atual: <strong>{tradingConfig?.mode || "PAPER"}</strong></p>
+          </div>
+
+          {/* ── 3 gates de proteção LIVE ── */}
+          <div className="card" style={{ marginTop: 12 }}>
+            <div className="card-title"><strong>Gates de proteção LIVE</strong><span className="chip">3 confirmações</span></div>
+            <p className="settings-help">
+              O robô só executa ordens LIVE se os 3 gates abaixo estiverem abertos.
+              Isso evita execuções acidentais em dinheiro real.
+            </p>
+            {/* Gate 1 */}
+            <div className="row" style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.07)" }}>
+              <div>
+                <span style={{ fontWeight: 700, color: "var(--text)" }}>Gate 1 — Trading ativado</span>
+                <p className="settings-help" style={{ margin: "2px 0 0" }}>O switch de enabled/disabled precisa estar ON.</p>
+              </div>
+              <span className={`chip badge ${tradingConfig?.enabled ? "buy" : "avoid"}`}>
+                {tradingConfig?.enabled ? "✓ Aberto" : "✗ Fechado"}
+              </span>
             </div>
+            {/* Gate 2 */}
+            <div className="row" style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,.07)" }}>
+              <div>
+                <span style={{ fontWeight: 700, color: "var(--text)" }}>Gate 2 — Confirmação LIVE no frontend</span>
+                <p className="settings-help" style={{ margin: "2px 0 0" }}>Você precisa digitar <strong>LIVE</strong> abaixo e confirmar.</p>
+              </div>
+              <span className={`chip badge ${tradingConfig?.liveGuard?.liveConfirmed ? "buy" : "wait"}`}>
+                {tradingConfig?.liveGuard?.liveConfirmed ? "✓ Confirmado" : "Pendente"}
+              </span>
+            </div>
+            {/* Gate 3 */}
+            <div className="row" style={{ padding: "10px 0" }}>
+              <div>
+                <span style={{ fontWeight: 700, color: "var(--text)" }}>Gate 3 — Secret LIVE_TRADING_ARMED</span>
+                <p className="settings-help" style={{ margin: "2px 0 0" }}>
+                  Secret de sistema no Cloud Run. Controlado pelo operador — não é editável aqui.
+                  Se não estiver configurado, o backend bloqueia mesmo que Gate 1 e 2 estejam abertos.
+                </p>
+              </div>
+              <span className="chip badge wait">Servidor</span>
+            </div>
+            {/* Ação gate 2 */}
+            <div className="row" style={{ marginTop: 12 }}>
+              <input
+                value={confirmText}
+                onChange={(e) => setConfirmText(e.target.value)}
+                placeholder="Digite LIVE para confirmar gate 2"
+              />
+              <button className="btn" onClick={confirmLiveMode}>Confirmar LIVE (Gate 2)</button>
+            </div>
+          </div>
+
+          {/* ── Validar credenciais Binance ── */}
+          <div className="card" style={{ marginTop: 12 }}>
+            <div className="card-title">
+              <strong>Validar credenciais Binance</strong>
+              <span className="chip">{tradingConfig?.mode || "PAPER"}</span>
+            </div>
+            <p className="settings-help">
+              Testa se as chaves configuradas no backend conseguem autenticar na Binance
+              ({tradingConfig?.mode === "TESTNET" ? "Testnet" : tradingConfig?.mode === "LIVE" ? "LIVE" : "PAPER — sem chaves"}).
+            </p>
+            <button className="btn" onClick={validateBinance} disabled={binanceValidating}>
+              {binanceValidating ? "Validando…" : "Testar conexão Binance"}
+            </button>
+            {binanceValidation && (
+              <div style={{
+                marginTop: 10,
+                padding: "10px 14px",
+                borderRadius: 6,
+                background: binanceValidation.ok ? "var(--good-dim)" : "var(--danger-dim)",
+                border: `1px solid ${binanceValidation.ok ? "rgba(34,197,94,.3)" : "rgba(239,68,68,.3)"}`,
+              }}>
+                {binanceValidation.ok ? (
+                  <>
+                    <div className="row"><span>Status</span><span className="mono" style={{ color: "var(--good)" }}>✓ Conectado — canTrade: {String(binanceValidation.canTrade)}</span></div>
+                    <div className="row"><span>Modo testado</span><span className="mono">{binanceValidation.mode}</span></div>
+                    <div className="row"><span>Permissões</span><span className="mono">{(binanceValidation.permissions || []).join(", ") || "—"}</span></div>
+                    <div className="row"><span>Ativos com saldo</span><span className="mono">{binanceValidation.balancesCount ?? "—"}</span></div>
+                  </>
+                ) : (
+                  <div className="row"><span style={{ color: "var(--danger)" }}>Erro</span><span className="mono" style={{ color: "#FCA5A5" }}>{binanceValidation.error}</span></div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="card" style={{ marginTop: 12 }}>

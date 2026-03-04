@@ -115,3 +115,11 @@ export async function fetchLiveQuotes(symbols) {
 export async function fetchExplain(symbol) {
   return getJson(`/api/explain/${encodeURIComponent(symbol)}`);
 }
+
+export async function fetchBinanceValidate() {
+  return postJson("/internal/binance/validate", {}, true);
+}
+
+export async function fetchExecutorApiStatus() {
+  return getJson("/internal/executor/status", true);
+}

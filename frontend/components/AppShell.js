@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { subscribeTradingState } from "../lib/firestore";
+import { subscribeTradingConfig, subscribeTradingState, subscribeExecutorStatus } from "../lib/firestore";
 import ModeBanner from "./ui/ModeBanner";
 
 const NAV_ITEMS = [
@@ -45,6 +45,8 @@ export default function AppShell({ title, subtitle, children, rightActions }) {
   const pathname = usePathname();
   const [currentQuery, setCurrentQuery] = useState("");
   const [tradingMode, setTradingMode] = useState("PAPER");
+  const [tradingEnabled, setTradingEnabled] = useState(false);
+  const [executorStatus, setExecutorStatus] = useState(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -55,6 +57,18 @@ export default function AppShell({ title, subtitle, children, rightActions }) {
     return subscribeTradingState((state) => {
       if (state?.mode) setTradingMode(String(state.mode).toUpperCase());
     });
+  }, []);
+
+  useEffect(() => {
+    return subscribeTradingConfig((cfg) => {
+      if (!cfg) return;
+      if (cfg.mode) setTradingMode(String(cfg.mode).toUpperCase());
+      setTradingEnabled(Boolean(cfg.enabled));
+    });
+  }, []);
+
+  useEffect(() => {
+    return subscribeExecutorStatus((s) => setExecutorStatus(s));
   }, []);
 
   const currentParams = new URLSearchParams(currentQuery);
@@ -102,8 +116,36 @@ export default function AppShell({ title, subtitle, children, rightActions }) {
 
         <div className="sidebar-footer">
           <div className="status">
-            <div className="flex"><span className="dot"></span><span>Online</span></div>
-            <span className="chip">LIVE</span>
+            {(() => {
+              const isTestnet = tradingMode === "TESTNET";
+              const executorOnline = isTestnet ? (executorStatus?.online === true) : true;
+              const botOn = tradingEnabled && executorOnline;
+              const dotColor = botOn ? "var(--good)" : tradingEnabled ? "var(--warn)" : "#6B7280";
+              const label = botOn ? "Online" : tradingEnabled && isTestnet ? "Sem executor" : tradingEnabled ? "Sem executor" : "Parado";
+              return (
+                <div className="flex" style={{ gap: 6, alignItems: "center" }}>
+                  <span className="dot" style={{ background: dotColor, boxShadow: botOn ? `0 0 5px ${dotColor}` : "none" }}></span>
+                  <span style={{ color: botOn ? "var(--text)" : "var(--muted)", fontSize: "var(--fs-xs)" }}>{label}</span>
+                </div>
+              );
+            })()}
+            {(() => {
+              const modeColor = tradingMode === "LIVE"
+                ? { color: "#FCA5A5", bg: "rgba(239,68,68,.15)", border: "rgba(239,68,68,.35)" }
+                : tradingMode === "TESTNET"
+                  ? { color: "#86EFAC", bg: "rgba(34,197,94,.12)", border: "rgba(34,197,94,.35)" }
+                  : { color: "var(--muted)", bg: "rgba(255,255,255,.05)", border: "rgba(255,255,255,.12)" };
+              return (
+                <span style={{
+                  fontSize: "var(--fs-xs)", fontWeight: 700,
+                  padding: "3px 9px", borderRadius: 6,
+                  color: modeColor.color, background: modeColor.bg,
+                  border: `1px solid ${modeColor.border}`,
+                }}>
+                  {tradingMode || "PAPER"}
+                </span>
+              );
+            })()}
           </div>
         </div>
       </aside>
