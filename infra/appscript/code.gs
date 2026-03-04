@@ -87,24 +87,35 @@ function doGet(e) {
 
 function buildHtmlEmail_(subject, message, payload) {
   var event = (payload && payload.event) || (payload && payload.type) || '';
+  var symbol = (payload && payload.symbol) || '';
+  var mode = (payload && payload.mode) || '';
+  var price = (payload && payload.price) ? 'U$ ' + parseFloat(payload.price).toFixed(4) : '';
+  var score = (payload && payload.score != null) ? payload.score : '';
+  var regime = (payload && payload.regime) || '';
+  var signal = (payload && payload.signal) || '';
+  var orderId = (payload && payload.orderId) || '';
+  var reason = (payload && payload.reason) || '';
+  var rsi = (payload && payload.rsi14) ? parseFloat(payload.rsi14).toFixed(1) : '';
+  var stop = (payload && payload.stopPrice) ? 'U$ ' + parseFloat(payload.stopPrice).toFixed(4) : '';
+  var take = (payload && payload.takePrice) ? 'U$ ' + parseFloat(payload.takePrice).toFixed(4) : '';
+  var lastPrice = (payload && payload.lastPrice) ? 'U$ ' + parseFloat(payload.lastPrice).toFixed(4) : '';
+  var qty = (payload && payload.qty) ? payload.qty : '';
+  var action = (payload && payload.action_items) || '';
 
-  // Cor do cabeçalho por tipo de evento
+  // Cor e ícone por evento
   var colorMap = {
-    'BUY':              '#16a34a',  // verde
+    'BUY':              '#16a34a',
     'TRADE_EXECUTED':   '#16a34a',
-    'NEAR_ENTRY':       '#d97706',  // amarelo
-    'SCORE_JUMP':       '#2563eb',  // azul
-    'REGIME_CHANGE':    '#7c3aed',  // roxo
-    'POSITION_EXIT':    '#ea580c',  // laranja
-    'STOP_HIT':         '#dc2626',  // vermelho
-    'TAKE_HIT':         '#16a34a',  // verde
+    'NEAR_ENTRY':       '#b45309',
+    'SCORE_JUMP':       '#2563eb',
+    'REGIME_CHANGE':    '#7c3aed',
+    'POSITION_EXIT':    '#ea580c',
+    'STOP_HIT':         '#dc2626',
+    'TAKE_HIT':         '#16a34a',
     'FAILSAFE':         '#dc2626',
     'DISARM':           '#dc2626',
-    'TEST_ALERT':       '#6b7280',  // cinza
+    'TEST_ALERT':       '#6b7280',
   };
-  var headerColor = colorMap[event] || '#1e293b';
-
-  // Ícone por tipo
   var iconMap = {
     'BUY':              '🟢',
     'TRADE_EXECUTED':   '✅',
@@ -118,42 +129,112 @@ function buildHtmlEmail_(subject, message, payload) {
     'DISARM':           '🚨',
     'TEST_ALERT':       '🔔',
   };
-  var icon = iconMap[event] || '📊';
 
-  // Linhas de detalhe do payload
-  var skipKeys = {'token': 1, 'test': 1, 'action_items': 1, 'explanation': 1, 'summary_leigo': 1};
+  // Títulos e descrições em português por evento
+  var titleMap = {
+    'BUY':            'Sinal de Compra Detectado',
+    'TRADE_EXECUTED': mode === 'PAPER' ? 'Compra Simulada Executada (Paper)' : 'Ordem de Compra Executada',
+    'NEAR_ENTRY':     'Ativo Próximo de Sinal de Compra',
+    'SCORE_JUMP':     'Score com Alta Expressiva',
+    'REGIME_CHANGE':  'Mudança de Regime de Mercado',
+    'POSITION_EXIT':  'Posição Encerrada',
+    'STOP_HIT':       'Stop Loss Acionado',
+    'TAKE_HIT':       'Take Profit Atingido 🎉',
+    'FAILSAFE':       'ALERTA: Trading Desarmado Automaticamente',
+    'DISARM':         'ALERTA: Trading Desarmado',
+    'TEST_ALERT':     'Notificação de Teste — BotBit',
+  };
+
+  var descMap = {
+    'BUY':            'O modelo identificou um sinal de <strong>COMPRA</strong> para ' + (symbol || 'o ativo') + '. Todos os indicadores estão alinhados para uma entrada.',
+    'TRADE_EXECUTED': 'Uma ordem de compra foi ' + (mode === 'PAPER' ? 'simulada' : 'enviada à Binance') + ' para <strong>' + (symbol || 'o ativo') + '</strong>.',
+    'NEAR_ENTRY':     '<strong>' + (symbol || 'O ativo') + '</strong> está se aproximando de uma oportunidade de compra. Ainda não é sinal BUY, mas vale monitorar.',
+    'SCORE_JUMP':     'O score de <strong>' + (symbol || 'o ativo') + '</strong> subiu significativamente, indicando melhora nos indicadores técnicos.',
+    'REGIME_CHANGE':  'Houve uma alteração no regime de mercado de <strong>' + (symbol || 'o ativo') + '</strong>. Isso pode impactar posições abertas e novas entradas.',
+    'POSITION_EXIT':  'A posição em <strong>' + (symbol || 'o ativo') + '</strong> foi encerrada' + (reason ? ' — motivo: ' + reasonLabel_(reason) : '') + '.',
+    'STOP_HIT':       '<strong>Stop loss acionado</strong> para ' + (symbol || 'o ativo') + '. A posição foi encerrada para limitar perdas conforme configurado.',
+    'TAKE_HIT':       '<strong>Take profit atingido</strong> para ' + (symbol || 'o ativo') + '. A posição foi encerrada com lucro!',
+    'FAILSAFE':       'O trading foi <strong>desarmado automaticamente</strong> por segurança. Verifique o painel e rearme manualmente após resolver o problema.',
+    'DISARM':         'O trading foi desarmado. Verifique o painel de configurações.',
+    'TEST_ALERT':     'Este é um email de teste do BotBit. As notificações estão funcionando corretamente! ✅',
+  };
+
+  var headerColor = colorMap[event] || '#1e293b';
+  var icon = iconMap[event] || '📊';
+  var titleText = titleMap[event] || subject;
+  var descText = descMap[event] || message;
+
+  // Tabela de detalhes técnicos
+  var details = [];
+  if (symbol)    details.push(['Ativo', symbol]);
+  if (signal)    details.push(['Sinal', signal]);
+  if (regime)    details.push(['Regime', regime]);
+  if (score !== '') details.push(['Score', score + ' / 100']);
+  if (price)     details.push(['Preço de entrada', price]);
+  if (lastPrice) details.push(['Último preço', lastPrice]);
+  if (stop)      details.push(['Stop loss', stop]);
+  if (take)      details.push(['Take profit', take]);
+  if (qty)       details.push(['Quantidade', qty]);
+  if (rsi)       details.push(['RSI (14)', rsi]);
+  if (orderId)   details.push(['ID da ordem', orderId]);
+  if (mode)      details.push(['Modo', mode === 'PAPER' ? '📋 Simulado (Paper)' : '🔴 LIVE']);
+  if (reason)    details.push(['Motivo saída', reasonLabel_(reason)]);
+
   var rows = '';
-  if (payload) {
-    Object.keys(payload).forEach(function(k) {
-      if (skipKeys[k]) return;
-      var v = payload[k];
-      if (v === null || v === undefined || v === '') return;
-      rows += '<tr><td style="padding:4px 8px;color:#64748b;font-size:13px;">' + k + '</td>'
-            + '<td style="padding:4px 8px;font-size:13px;font-weight:600;">' + v + '</td></tr>';
-    });
+  for (var i = 0; i < details.length; i++) {
+    var bg = i % 2 === 0 ? '#f8fafc' : '#ffffff';
+    rows += '<tr style="background:' + bg + ';">'
+          + '<td style="padding:8px 12px;color:#64748b;font-size:13px;width:45%;">' + details[i][0] + '</td>'
+          + '<td style="padding:8px 12px;font-size:13px;font-weight:600;color:#1e293b;">' + details[i][1] + '</td>'
+          + '</tr>';
   }
   var detailsBlock = rows
-    ? '<table style="width:100%;border-collapse:collapse;margin-top:12px;">' + rows + '</table>'
+    ? '<table style="width:100%;border-collapse:collapse;margin-top:16px;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;">' + rows + '</table>'
     : '';
 
-  var actionItems = (payload && payload.action_items) ? payload.action_items : '';
-  var actionBlock = actionItems
-    ? '<div style="margin-top:16px;padding:10px 14px;background:#fef9c3;border-left:4px solid #eab308;border-radius:4px;font-size:13px;">👉 ' + actionItems + '</div>'
+  var actionBlock = action
+    ? '<div style="margin-top:16px;padding:12px 16px;background:#fef9c3;border-left:4px solid #eab308;border-radius:4px;font-size:13px;color:#713f12;">👉 <strong>O que fazer:</strong> ' + action + '</div>'
     : '';
 
-  return '<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,sans-serif;">'
-    + '<div style="max-width:560px;margin:24px auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08);">'
-    + '<div style="background:' + headerColor + ';padding:20px 24px;">'
-    + '<div style="font-size:22px;font-weight:700;color:#fff;">' + icon + ' ' + subject + '</div>'
+  var modeTag = mode === 'PAPER'
+    ? '<span style="background:#dbeafe;color:#1d4ed8;font-size:11px;padding:2px 8px;border-radius:12px;margin-left:8px;">PAPER</span>'
+    : (mode === 'LIVE' ? '<span style="background:#fee2e2;color:#dc2626;font-size:11px;padding:2px 8px;border-radius:12px;margin-left:8px;">LIVE</span>' : '');
+
+  return '<!DOCTYPE html><html><body style="margin:0;padding:20px;background:#f1f5f9;font-family:Arial,sans-serif;">'
+    + '<div style="max-width:580px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,.1);">'
+
+    // Cabeçalho colorido
+    + '<div style="background:' + headerColor + ';padding:24px 28px;">'
+    + '<div style="font-size:24px;font-weight:700;color:#fff;line-height:1.3;">' + icon + ' ' + titleText + modeTag + '</div>'
+    + (symbol ? '<div style="color:rgba(255,255,255,.8);font-size:14px;margin-top:4px;">Ativo: ' + symbol + '</div>' : '')
     + '</div>'
-    + '<div style="padding:20px 24px;">'
-    + '<p style="margin:0 0 12px;font-size:15px;color:#1e293b;">' + message.replace(/\n/g, '<br>') + '</p>'
+
+    // Corpo
+    + '<div style="padding:24px 28px;">'
+    + '<p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">' + descText + '</p>'
     + detailsBlock
     + actionBlock
     + '</div>'
-    + '<div style="padding:12px 24px;background:#f8fafc;font-size:11px;color:#94a3b8;text-align:center;">'
-    + 'BotBit &bull; ' + new Date().toLocaleString('pt-BR') + '</div>'
+
+    // Rodapé
+    + '<div style="padding:14px 28px;background:#f8fafc;border-top:1px solid #e2e8f0;font-size:11px;color:#94a3b8;display:flex;justify-content:space-between;">'
+    + '<span>🤖 BotBit — Plataforma de Trading Automatizado</span>'
+    + '<span>' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}) + '</span>'
+    + '</div>'
+
     + '</div></body></html>';
+}
+
+function reasonLabel_(reason) {
+  var labels = {
+    'stop_hit':        'Stop loss acionado',
+    'take_hit':        'Take profit atingido',
+    'regime_or_signal_exit': 'Mudança de regime/sinal',
+    'manual':          'Encerramento manual',
+    'failsafe':        'Mecanismo de segurança',
+    'BINANCE_451':     'Bloqueio Binance (451)',
+  };
+  return labels[reason] || reason;
 }
 
 function doPost(e) {

@@ -741,17 +741,41 @@ def run_trade_pipeline() -> dict[str, Any]:
                     fs.upsert_trading_position(symbol, {"status": "CLOSED", "closedAt": _now(), "closeReason": reason, "lastPrice": last_price})
                     fs.update_trade_intent(sell_intent_id, {"status": "FILLED"})
                     event_type = "STOP_HIT" if reason == "stop_hit" else ("TAKE_HIT" if reason == "take_hit" else "POSITION_EXIT")
+                    _pos_data = fs.client.collection("trading_positions").document(symbol).get().to_dict() or {}
+                    _entry = _safe_float(_pos_data.get("avgEntry"), 0)
+                    _pnl_pct = round(((last_price - _entry) / _entry) * 100, 2) if _entry > 0 else 0
+                    _exit_titles = {
+                        "STOP_HIT": f"Stop Loss Acionado — {symbol}",
+                        "TAKE_HIT": f"Take Profit Atingido — {symbol}",
+                        "POSITION_EXIT": f"Posição Encerrada — {symbol}",
+                    }
+                    _exit_actions = {
+                        "STOP_HIT": "Perda limitada conforme configurado. Verifique se deseja ajustar o stop.",
+                        "TAKE_HIT": "Lucro realizado! Verifique se há nova oportunidade de entrada.",
+                        "POSITION_EXIT": "Verifique o motivo da saída e se as regras estão adequadas.",
+                    }
                     _notify(
                         fs,
                         alerts,
                         owner_uid,
                         event_type=event_type,
                         priority="P1",
-                        title=f"Saída {symbol}",
-                        message=f"{symbol} fechado por {reason}",
+                        title=_exit_titles.get(event_type, f"Saída {symbol}"),
+                        message=f"Posição em {symbol} encerrada.",
                         symbol=symbol,
                         direction="SELL",
-                        payload={"reason": reason, "lastPrice": last_price, "mode": mode, "orderId": sell_order_id, "action_items": "Checar motivo da saída"},
+                        payload={
+                            "type": event_type,
+                            "symbol": symbol,
+                            "mode": mode,
+                            "lastPrice": last_price,
+                            "price": _entry if _entry > 0 else None,
+                            "qty": _safe_float(_pos_data.get("qty"), 0) or _safe_float(position.get("qty"), 0),
+                            "reason": reason,
+                            "orderId": sell_order_id,
+                            "pnl_pct": f"{'+' if _pnl_pct >= 0 else ''}{_pnl_pct}%",
+                            "action_items": _exit_actions.get(event_type, "Checar motivo da saída no painel"),
+                        },
                     )
                 except Exception as exc:
                     fs.update_trade_intent(sell_intent_id, {"status": "REJECTED", "error": str(exc)})
@@ -820,17 +844,32 @@ def run_trade_pipeline() -> dict[str, Any]:
                     if ok:
                         executed += 1
                         fs.increment_daily_trade_counter(date_key, 1)
+                        _paper_atr = max(_safe_float(candidate.get("atr"), 0), price * 0.003)
+                        _paper_stop = round(max(0.0, price - _safe_float(exit_cfg.get("stopAtrMult"), 1.5) * _paper_atr), 8)
+                        _paper_take = round(max(price, price + _safe_float(exit_cfg.get("takeAtrMult"), 2.5) * _paper_atr), 8)
                         _notify(
                             fs,
                             alerts,
                             owner_uid,
                             event_type="TRADE_EXECUTED",
                             priority="P1",
-                            title="PAPER BUY",
-                            message=f"{symbol} executado em PAPER",
+                            title=f"Compra Simulada — {symbol}",
+                            message=f"Ordem de compra simulada (Paper) executada para {symbol}.",
                             symbol=symbol,
                             direction="BUY",
-                            payload={"symbol": symbol, "mode": mode, "action_items": "Acompanhar evolução da posição"},
+                            payload={
+                                "type": "TRADE_EXECUTED",
+                                "symbol": symbol,
+                                "mode": mode,
+                                "price": round(price, 8),
+                                "qty": qty,
+                                "score": candidate.get("score"),
+                                "regime": candidate.get("regime"),
+                                "signal": candidate.get("signal"),
+                                "stopPrice": _paper_stop,
+                                "takePrice": _paper_take,
+                                "action_items": "Acompanhar evolução da posição no painel de Trading",
+                            },
                         )
                     else:
                         skipped += 1
@@ -952,11 +991,24 @@ def run_trade_pipeline() -> dict[str, Any]:
                         owner_uid,
                         event_type="TRADE_EXECUTED",
                         priority="P1",
-                        title="TRADE EXECUTADO",
-                        message=f"{symbol} BUY {mode}",
+                        title=f"Ordem de Compra Executada — {symbol}",
+                        message=f"Ordem LIMIT de compra enviada à Binance para {symbol}.",
                         symbol=symbol,
                         direction="BUY",
-                        payload={"symbol": symbol, "mode": mode, "orderId": order_id, "intentId": buy_intent_id, "action_items": "Monitorar stop/take"},
+                        payload={
+                            "type": "TRADE_EXECUTED",
+                            "symbol": symbol,
+                            "mode": mode,
+                            "price": round(price, 8),
+                            "qty": qty,
+                            "score": candidate.get("score"),
+                            "regime": candidate.get("regime"),
+                            "signal": candidate.get("signal"),
+                            "stopPrice": round(stop_price, 8),
+                            "takePrice": round(take_price, 8),
+                            "orderId": order_id,
+                            "action_items": "Monitorar evolução do preço — stop e take já configurados",
+                        },
                     )
                 except Exception as exc:
                     if not str(exc).startswith("OCO_FAIL"):

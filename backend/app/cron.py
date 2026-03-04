@@ -186,27 +186,60 @@ def _send_alert_if_needed(
         return False
 
     stop_value = latest.get("stop_price")
-    stop_text = f"{float(stop_value):.2f}" if stop_value is not None else "N/A"
-    message = (
-        f"SINAL: {latest_signal} | {symbol} | score={latest.get('score')} | "
-        f"stop={stop_text} | regime={latest_regime} | RSI={float(latest.get('rsi14') or 0):.1f} | evento={alert_type}"
-    )
-    subject = f"[BotBit] {alert_type} - {symbol}"
+    stop_text = f"U$ {float(stop_value):.4f}" if stop_value is not None else "N/A"
+    rsi_val = float(latest.get("rsi14") or 0)
+
+    _subjects = {
+        "BUY": f"[BotBit] 🟢 Sinal de Compra — {symbol}",
+        "REGIME_CHANGE": f"[BotBit] 🔄 Mudança de Regime — {symbol}",
+        "SCORE_JUMP": f"[BotBit] 📈 Score em Alta — {symbol}",
+    }
+    _messages = {
+        "BUY": (
+            f"Sinal BUY detectado para {symbol}.\n"
+            f"Score: {current_score}/100 | Regime: {latest_regime} | RSI: {rsi_val:.1f}\n"
+            f"Stop sugerido: {stop_text}"
+        ),
+        "REGIME_CHANGE": (
+            f"Regime de {symbol} mudou de {previous_regime} → {latest_regime}.\n"
+            f"Score atual: {current_score}/100 | Sinal: {latest_signal} | RSI: {rsi_val:.1f}"
+        ),
+        "SCORE_JUMP": (
+            f"Score de {symbol} subiu {score_jump} pontos ({previous_score} → {current_score}).\n"
+            f"Regime: {latest_regime} | Sinal: {latest_signal} | RSI: {rsi_val:.1f}"
+        ),
+    }
+    subject = _subjects.get(alert_type, f"[BotBit] {alert_type} — {symbol}")
+    message = _messages.get(alert_type, f"{symbol} | score={current_score} | regime={latest_regime}")
+
+    _action_items = {
+        "BUY": "Verifique o painel de Sinais e considere entrada se o contexto macro estiver favorável.",
+        "REGIME_CHANGE": "Revise posições abertas — mudança de regime pode exigir saída ou cautela.",
+        "SCORE_JUMP": "Score em alta. Acompanhe se chega a sinal BUY nas próximas horas.",
+    }
+
+    payload = {
+        "type": alert_type,
+        "symbol": symbol,
+        "signal": latest_signal,
+        "regime": latest_regime,
+        "score": current_score,
+        "rsi14": round(rsi_val, 1),
+        "stopPrice": stop_value,
+        "previousRegime": previous_regime,
+        "scoreJump": score_jump if alert_type == "SCORE_JUMP" else None,
+        "action_items": _action_items.get(alert_type, ""),
+    }
 
     # Always persist in BigQuery + Firestore regardless of email outcome
     storage.insert_alert(alert_id, symbol, str(latest_signal), datetime.fromisoformat(str(latest.get("ts")).replace("Z", "+00:00")))
-    email_ok, email_err = alerter.send_email(destination_email, subject, message, {"symbol": symbol, "event": alert_type})
+    email_ok, email_err = alerter.send_email(destination_email, subject, message, payload)
     if fs_storage and owner_uid:
         fs_storage.add_notification(
             owner_uid,
             alert_id,
             {
-                "type": "MARKET_ALERT",
-                "symbol": symbol,
-                "signal": latest_signal,
-                "regime": latest_regime,
-                "score": current_score,
-                "message": message,
+                **payload,
                 "emailSent": email_ok,
                 "emailError": email_err or None,
             },
