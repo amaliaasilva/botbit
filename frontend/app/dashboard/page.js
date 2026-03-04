@@ -58,8 +58,9 @@ function scoreColor(score) {
 
 function signalLabelPt(signal) {
   const v = String(signal || "WAIT").toUpperCase();
-  if (v === "BUY") return "Compra";
-  if (v === "SELL") return "Venda";
+  if (v === "BUY")   return "Compra";
+  if (v === "SELL")  return "Venda";
+  if (v === "AVOID") return "Evitar";
   return "Aguardar";
 }
 

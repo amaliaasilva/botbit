@@ -103,6 +103,35 @@ class FirestoreNotificationStorage:
         doc_ref_v2.set(body, merge=True)
         self.client.collection("public").document("discover_top").collection("items").document(symbol.upper()).set(body, merge=True)
 
+    # ── Scoring thresholds governance ─────────────────────────────────────
+
+    SCORING_DEFAULTS: dict[str, float] = {
+        "rsi_alta_min": 45.0,
+        "rsi_alta_max": 70.0,
+        "rsi_breakout_min": 50.0,
+        "rsi_pullback_threshold": 45.0,
+    }
+
+    def get_scoring_thresholds(self) -> dict[str, float]:
+        """Read config/scoring_thresholds; fill missing keys with hardcoded defaults."""
+        snap = self.client.collection("config").document("scoring_thresholds").get()
+        base: dict[str, float] = dict(self.SCORING_DEFAULTS)
+        if snap.exists:
+            remote = snap.to_dict() or {}
+            for key in self.SCORING_DEFAULTS:
+                if key in remote:
+                    try:
+                        base[key] = float(remote[key])
+                    except (TypeError, ValueError):
+                        pass
+        return base
+
+    def upsert_scoring_thresholds(self, payload: dict[str, float]) -> None:
+        """Write config/scoring_thresholds."""
+        doc_ref = self.client.collection("config").document("scoring_thresholds")
+        body = {"updatedAt": datetime.utcnow(), **payload}
+        doc_ref.set(body, merge=True)
+
     # ── Score Universe governance ──────────────────────────────────────────
 
     def get_score_universe(self) -> dict[str, Any] | None:

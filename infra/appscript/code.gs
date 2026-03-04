@@ -8,7 +8,7 @@
  * - ALLOWED_IPS: CSV de IPs permitidos (opcional, best-effort)
  */
 
-function jsonResponse(obj, statusCode) {
+function jsonResponse(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
@@ -57,6 +57,34 @@ function appendSheetLog_(subject, toEmail, message, payload) {
   ]);
 }
 
+/**
+ * GET de diagnóstico — retorna info do token sem expô-lo.
+ * Para testar se o token está certo:
+ *   GET <URL_DO_APPSCRIPT>?token=SEU_TOKEN
+ * Retorna { ok: true/false, match: true/false, storedLen, providedLen }
+ */
+function doGet(e) {
+  var props = PropertiesService.getScriptProperties();
+  var stored = (props.getProperty('ALERT_WEBHOOK_TOKEN') || '').trim();
+  var provided = ((e && e.parameter && e.parameter.token) || '').trim();
+
+  if (provided) {
+    return jsonResponse({
+      ok: provided === stored,
+      match: provided === stored,
+      storedLen: stored.length,
+      providedLen: provided.length,
+    });
+  }
+
+  return jsonResponse({
+    ok: true,
+    service: 'botbit-appscript',
+    tokenConfigured: stored.length > 0,
+    tokenLen: stored.length,
+  });
+}
+
 function doPost(e) {
   var props = PropertiesService.getScriptProperties();
   try {
@@ -65,9 +93,16 @@ function doPost(e) {
     }
 
     var body = parseBody_(e);
-    var expectedToken = props.getProperty('ALERT_WEBHOOK_TOKEN') || '';
-    if (!expectedToken || body.token !== expectedToken) {
-      return jsonResponse({ ok: false, error: 'unauthorized' });
+    var expectedToken = (props.getProperty('ALERT_WEBHOOK_TOKEN') || '').trim();
+    var receivedToken = (body.token || '').trim();
+
+    if (!expectedToken || receivedToken !== expectedToken) {
+      return jsonResponse({
+        ok: false,
+        error: 'unauthorized',
+        debug_stored_len: expectedToken.length,
+        debug_received_len: receivedToken.length,
+      });
     }
 
     var toEmail = body.toEmail;
@@ -82,7 +117,7 @@ function doPost(e) {
     MailApp.sendEmail(toEmail, subject, message);
     appendSheetLog_(subject, toEmail, message, payload);
 
-    return jsonResponse({ ok: true });
+    return jsonResponse({ ok: true, sentTo: toEmail });
   } catch (err) {
     return jsonResponse({ ok: false, error: String(err) });
   }

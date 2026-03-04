@@ -41,10 +41,17 @@ def _is_supported_symbol(symbol: str) -> bool:
     return True
 
 
-def _build_rows_crypto(symbol: str, df: pd.DataFrame, asset_type: str = "CRYPTO") -> list[dict[str, Any]]:
+def _build_rows_crypto(
+    symbol: str,
+    df: pd.DataFrame,
+    asset_type: str = "CRYPTO",
+    *,
+    thresholds: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if len(df) < 220:
         return rows
+    th = thresholds or {}
 
     recent = df[df["time"] >= (df["time"].max() - pd.Timedelta(days=90))].copy()
     for idx in range(1, len(recent)):
@@ -54,7 +61,11 @@ def _build_rows_crypto(symbol: str, df: pd.DataFrame, asset_type: str = "CRYPTO"
             continue
 
         breakout_ref = recent.iloc[max(0, idx - 20) : idx]["high"].max()
-        regime = resolve_regime(current["close"], current["ema50"], current["ema200"], current["rsi14"])
+        regime = resolve_regime(
+            current["close"], current["ema50"], current["ema200"], current["rsi14"],
+            rsi_alta_min=th.get("rsi_alta_min", 45.0),
+            rsi_alta_max=th.get("rsi_alta_max", 70.0),
+        )
         signal = resolve_signal(
             regime,
             _safe_float(prev["close"]),
@@ -64,6 +75,8 @@ def _build_rows_crypto(symbol: str, df: pd.DataFrame, asset_type: str = "CRYPTO"
             _safe_float(current["ema50"]),
             _safe_float(current["rsi14"]),
             _safe_float(breakout_ref),
+            rsi_breakout_min=th.get("rsi_breakout_min", 50.0),
+            rsi_pullback_threshold=th.get("rsi_pullback_threshold", 45.0),
         )
 
         score = resolve_score(
@@ -106,8 +119,8 @@ def _build_rows_crypto(symbol: str, df: pd.DataFrame, asset_type: str = "CRYPTO"
     return rows
 
 
-def _build_rows_btc(symbol: str, df: pd.DataFrame) -> list[dict[str, Any]]:
-    return _build_rows_crypto(symbol, df, asset_type="BTC")
+def _build_rows_btc(symbol: str, df: pd.DataFrame, *, thresholds: dict[str, float] | None = None) -> list[dict[str, Any]]:
+    return _build_rows_crypto(symbol, df, asset_type="BTC", thresholds=thresholds)
 
 
 def _build_rows_b3(symbol: str, df: pd.DataFrame) -> list[dict[str, Any]]:
@@ -344,6 +357,15 @@ def run_score_pipeline() -> dict[str, Any]:
 
     symbols = _resolve_universe(binance, fs_storage)
 
+    # Load scoring thresholds (configurable via config/scoring_thresholds)
+    scoring_thresholds: dict[str, float] = {}
+    if fs_storage:
+        try:
+            scoring_thresholds = fs_storage.get_scoring_thresholds()
+            log_event(logger, "scoring_thresholds_loaded", **scoring_thresholds)
+        except Exception as exc:
+            log_event(logger, "scoring_thresholds_load_error", error=str(exc))
+
     # Clean stale market docs no longer in the universe
     if fs_storage:
         try:
@@ -383,7 +405,7 @@ def run_score_pipeline() -> dict[str, Any]:
                 )
 
             features = enrich_btc_features(klines)
-            rows = _build_rows_crypto(symbol, features, asset_type=asset_type)
+            rows = _build_rows_crypto(symbol, features, asset_type=asset_type, thresholds=scoring_thresholds)
 
             if not rows:
                 if fs_storage:

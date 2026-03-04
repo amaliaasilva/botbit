@@ -8,8 +8,16 @@ def clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(value, max_value))
 
 
-def resolve_regime(close: float, ema50: float, ema200: float, rsi14: float) -> str:
-    if close > ema200 and ema50 > ema200 and 45 <= rsi14 <= 70:
+def resolve_regime(
+    close: float,
+    ema50: float,
+    ema200: float,
+    rsi14: float,
+    *,
+    rsi_alta_min: float = 45.0,
+    rsi_alta_max: float = 70.0,
+) -> str:
+    if close > ema200 and ema50 > ema200 and rsi_alta_min <= rsi14 <= rsi_alta_max:
         return "Alta"
     if close < ema200 or ema50 < ema200:
         return "Baixa"
@@ -25,14 +33,21 @@ def resolve_signal(
     ema50: float,
     rsi14: float,
     breakout_reference: float,
+    *,
+    rsi_breakout_min: float = 50.0,
+    rsi_pullback_threshold: float = 45.0,
 ) -> str:
     if regime == "Baixa":
         return "AVOID"
     if regime == "Neutro":
         return "WAIT"
 
-    pullback_retake = prev_close <= prev_ema50 and close > ema50 and prev_rsi14 < 45 <= rsi14
-    breakout_simple = close > breakout_reference and rsi14 >= 50
+    pullback_retake = (
+        prev_close <= prev_ema50
+        and close > ema50
+        and prev_rsi14 < rsi_pullback_threshold <= rsi14
+    )
+    breakout_simple = close > breakout_reference and rsi14 >= rsi_breakout_min
     if pullback_retake or breakout_simple:
         return "BUY"
     return "WAIT"
