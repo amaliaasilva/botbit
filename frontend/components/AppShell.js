@@ -8,9 +8,7 @@ import ModeBanner from "./ui/ModeBanner";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Mercado", icon: "▦" },
-  { href: "/dashboard?tab=watchlist", label: "Watchlist", icon: "◎" },
-  { href: "/dashboard?tab=discover", label: "Discover", icon: "◇" },
-  { href: "/portfolio", label: "Portfolio", icon: "◈" },
+  { href: "/portfolio", label: "Carteira", icon: "◈" },
   { href: "/notifications", label: "Alertas", icon: "◍" },
   { href: "/settings", label: "Settings", icon: "⚙" },
   { href: "/ajuda", label: "Ajuda", icon: "?" },

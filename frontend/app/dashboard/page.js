@@ -9,6 +9,7 @@ import AssetDetailPanel from "../../components/AssetDetailPanel";
 import { CommandStrip, Sparkline } from "../../components/ui";
 import {
   addWatchlistSymbol,
+  listDiscoverScores,
   listMarketScores,
   removeWatchlistSymbol,
   subscribeDiscoverLatest,
@@ -17,6 +18,7 @@ import {
   subscribeTradingState,
   subscribeWatchlist,
 } from "../../lib/firestore";
+import { fetchLiveQuotes } from "../../lib/backend";
 import { scoreBand, signalClass } from "../../lib/market";
 
 const TABS = [
@@ -132,6 +134,7 @@ function MercadoTab() {
   const [detailSymbol, setDetailSymbol] = useState("");
   const [selectedSymbol, setSelectedSymbol] = useState("BTCUSDT");
   const [tradingState, setTradingState] = useState(null);
+  const [discoverMap, setDiscoverMap] = useState({});
 
   useEffect(() => {
     setLoading(true);
@@ -140,6 +143,20 @@ function MercadoTab() {
       setLoading(false);
     });
   }, []);
+
+  /* Load discover data for ranking symbols whenever ranking updates */
+  useEffect(() => {
+    const syms = ranking.map((r) => r.symbol).filter(Boolean);
+    if (!syms.length) return;
+    let cancelled = false;
+    listDiscoverScores(syms).then((rows) => {
+      if (cancelled) return;
+      const map = {};
+      rows.forEach((r) => { if (r.symbol) map[r.symbol] = r; });
+      setDiscoverMap(map);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [ranking]);
 
   useEffect(() => {
     return subscribeTradingState((s) => setTradingState(s));
@@ -339,7 +356,7 @@ function MercadoTab() {
         symbol={detailSymbol}
         quote={quotesMap[detailSymbol] || null}
         market={ranking.find((r) => r.symbol === detailSymbol) || null}
-        discover={null}
+        discover={discoverMap[detailSymbol] || null}
         onClose={() => setDetailSymbol("")}
       />
     </>
@@ -350,29 +367,52 @@ function MercadoTab() {
 function WatchlistTab({ uid }) {
   const [items, setItems] = useState([]);
   const [rows, setRows] = useState([]);
+  const [discoverRows, setDiscoverRows] = useState([]);
   const [quotesMap, setQuotesMap] = useState({});
   const [symbol, setSymbol] = useState("");
   const [actionMsg, setActionMsg] = useState("");
   const [loading, setLoading] = useState(false);
   const [detailSymbol, setDetailSymbol] = useState("");
 
+  /* Stable key: only changes when the actual symbol list changes */
+  const symbolsKey = useMemo(
+    () => items.map((i) => i.symbol).filter(Boolean).sort().join(","),
+    [items]
+  );
+
+  /* 1) Subscribe watchlist — only update items when symbols truly change */
   useEffect(() => {
     if (!uid) return () => {};
-    return subscribeWatchlist(uid, async (data) => {
-      setItems(data);
-      if (!data.length) { setRows([]); return; }
-      setLoading(true);
-      try {
-        const resolved = await listMarketScores(data.map((i) => i.symbol));
-        setRows(resolved);
-      } finally {
-        setLoading(false);
+    let prevKey = "";
+    return subscribeWatchlist(uid, (data) => {
+      const key = data.map((i) => i.symbol).filter(Boolean).sort().join(",");
+      if (key !== prevKey) {
+        prevKey = key;
+        setItems(data);
       }
     });
   }, [uid]);
 
+  /* 2) Fetch market scores + discover scores in parallel */
   useEffect(() => {
-    const syms = items.map((i) => i.symbol).filter(Boolean);
+    if (!symbolsKey) { setRows([]); setDiscoverRows([]); return; }
+    let cancelled = false;
+    setLoading(true);
+    const syms = symbolsKey.split(",");
+    Promise.all([
+      listMarketScores(syms).catch(() => []),
+      listDiscoverScores(syms).catch(() => []),
+    ]).then(([marketRes, discoverRes]) => {
+      if (cancelled) return;
+      setRows(marketRes);
+      setDiscoverRows(discoverRes);
+    }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [symbolsKey]);
+
+  /* 3) Subscribe quotes — keyed on symbolsKey to avoid spurious re-subs */
+  useEffect(() => {
+    const syms = symbolsKey ? symbolsKey.split(",") : [];
     if (!syms.length) return () => {};
     return subscribeQuotes(syms, (qrows) => {
       setQuotesMap((prev) => {
@@ -381,7 +421,45 @@ function WatchlistTab({ uid }) {
         return next;
       });
     });
-  }, [items]);
+  }, [symbolsKey]);
+
+  /* 4) Fetch live quotes from Binance API for symbols missing from Firestore */
+  useEffect(() => {
+    if (!symbolsKey) return;
+    const syms = symbolsKey.split(",");
+    // Wait a bit for Firestore quotes to arrive, then fill gaps
+    const timer = setTimeout(() => {
+      const missing = syms.filter((s) => !quotesMap[s] || !quotesMap[s].price);
+      if (!missing.length) return;
+      fetchLiveQuotes(missing).then((liveItems) => {
+        if (!liveItems.length) return;
+        setQuotesMap((prev) => {
+          const next = { ...prev };
+          liveItems.forEach((r) => { next[r.symbol] = r; });
+          return next;
+        });
+      }).catch(() => {});
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [symbolsKey, quotesMap]);
+
+  /* Helper: merge market + discover data for a symbol */
+  function getRowData(sym) {
+    const market = rows.find((r) => r.symbol === sym) || null;
+    if (market) return market;
+    // Fallback: use discover data
+    const disc = discoverRows.find((r) => r.symbol === sym) || null;
+    if (!disc) return null;
+    return {
+      symbol: disc.symbol,
+      score: disc.potentialScore || 0,
+      signal: disc.signal || "WAIT",
+      regime: disc.regime || "Neutro",
+      rsi14: disc.keyMetrics?.rsi14 || 0,
+      atr14: disc.keyMetrics?.atr14 || 0,
+      _fromDiscover: true,
+    };
+  }
 
   async function quickAdd(sym) {
     if (!uid) return;
@@ -459,13 +537,16 @@ function WatchlistTab({ uid }) {
               </thead>
               <tbody>
                 {items.map((item) => {
-                  const data = rows.find((r) => r.symbol === item.symbol) || null;
+                  const data = getRowData(item.symbol);
                   const q = quotesMap[item.symbol] || {};
                   const score = Number(data?.score || 0);
                   const chg = q.change24hPct != null ? Number(q.change24hPct) : null;
                   return (
                     <tr key={item.symbol} onClick={() => setDetailSymbol(item.symbol)} style={{ cursor: "pointer" }}>
-                      <td className="asset">{item.symbol}</td>
+                      <td className="asset">
+                        {item.symbol}
+                        {data?._fromDiscover && <span className="chip" style={{ marginLeft: 6, fontSize: 9 }}>Discover</span>}
+                      </td>
                       <td className="mono">{fmtPrice(q.price)}</td>
                       <td
                         className="mono"
@@ -507,7 +588,7 @@ function WatchlistTab({ uid }) {
         symbol={detailSymbol}
         quote={quotesMap[detailSymbol] || null}
         market={rows.find((r) => r.symbol === detailSymbol) || null}
-        discover={null}
+        discover={discoverRows.find((r) => r.symbol === detailSymbol) || null}
         onClose={() => setDetailSymbol("")}
       />
     </>
