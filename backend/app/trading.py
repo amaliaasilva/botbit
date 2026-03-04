@@ -379,6 +379,20 @@ def _close_position_paper(
 
 
 def _live_gate_ok(config: dict[str, Any]) -> tuple[bool, str]:
+    """Triple gate for LIVE trading. ALL conditions must pass.
+
+    Gate 1 — Firestore config (UI-side confirmation):
+      liveGuard.liveConfirmed == True AND typedText matches doubleConfirmText
+      AND liveConfirmedAt is set AND cooldown has elapsed.
+
+    Gate 2 — Feature flag secret (infra-side, must be set via gcloud):
+      Secret LIVE_TRADING_ENABLED == "true"
+
+    Gate 3 — Arming secret (hard requirement, set ONLY when intentionally arming):
+      Secret LIVE_TRADING_ARMED == "YES_I_KNOW_WHAT_IM_DOING"
+      Must be EXPLICITLY set — omitted/empty/wrong always blocks LIVE.
+    """
+    # Gate 1A: Firestore UI confirmation
     guard = config.get("liveGuard") or {}
     if not bool(guard.get("liveConfirmed", False)):
         return False, "LIVE_NOT_CONFIRMED"
@@ -388,6 +402,7 @@ def _live_gate_ok(config: dict[str, Any]) -> tuple[bool, str]:
     if typed != confirm_text:
         return False, "LIVE_CONFIRM_TEXT_INVALID"
 
+    # Gate 1B: Confirmation timestamp + cooldown
     confirmed_at = _parse_ts(guard.get("liveConfirmedAt"))
     if not confirmed_at:
         return False, "LIVE_CONFIRM_TIME_MISSING"
@@ -396,9 +411,15 @@ def _live_gate_ok(config: dict[str, Any]) -> tuple[bool, str]:
     if _now() < confirmed_at + timedelta(minutes=max(1, cooldown_minutes)):
         return False, "LIVE_COOLDOWN_PENDING"
 
+    # Gate 2: Feature flag secret (gcloud secrets must be set explicitly)
     feature_flag = str(get_secret("LIVE_TRADING_ENABLED") or "false").lower() == "true"
     if not feature_flag:
         return False, "LIVE_FEATURE_FLAG_OFF"
+
+    # Gate 3: Hard arming secret — only opens when exact phrase is set
+    armed_secret = str(get_secret("LIVE_TRADING_ARMED") or "").strip()
+    if armed_secret != "YES_I_KNOW_WHAT_IM_DOING":
+        return False, "LIVE_NOT_ARMED"
 
     return True, "OK"
 
@@ -671,11 +692,27 @@ def run_trade_pipeline() -> dict[str, Any]:
                     payload={"reason": reason, "lastPrice": last_price, "action_items": "Revisar regras de saída"},
                 )
             else:
+                # SELL — always write intent first (audit + idempotency)
+                sell_intent_id = _dedupe_order_id(run_id, symbol, "SELL", mode)
+                fs.write_trade_intent(sell_intent_id, {
+                    "runId": run_id,
+                    "symbol": symbol,
+                    "side": "SELL",
+                    "orderType": "MARKET",
+                    "quantity": _safe_float(position.get("qty"), 0),
+                    "price": last_price,
+                    "mode": mode,
+                    "reason": reason,
+                })
                 try:
                     client = BinanceTradeClient(api_key=api_key, api_secret=api_secret, mode=mode)
-                    sell = client.place_order(symbol=symbol, side="SELL", order_type="MARKET", quantity=_safe_float(position.get("qty"), 0), newClientOrderId=_dedupe_order_id(run_id, symbol, "SELL", mode))
-                    fs.upsert_trading_order(str(sell.get("orderId") or _dedupe_order_id(run_id, symbol, "SELL", mode)), {"runId": run_id, "symbol": symbol, "side": "SELL", "status": str(sell.get("status") or "SENT"), "mode": mode, "price": _safe_float(sell.get("price"), last_price), "qty": _safe_float(position.get("qty"), 0), "reason": reason})
+                    sell = client.place_order(symbol=symbol, side="SELL", order_type="MARKET", quantity=_safe_float(position.get("qty"), 0), newClientOrderId=sell_intent_id)
+                    sell_order_id = str(sell.get("orderId") or sell_intent_id)
+                    sell_status = str(sell.get("status") or "SENT")
+                    fs.update_trade_intent(sell_intent_id, {"status": "SUBMITTED", "orderId": sell_order_id, "orderStatus": sell_status})
+                    fs.upsert_trading_order(sell_order_id, {"runId": run_id, "symbol": symbol, "side": "SELL", "status": sell_status, "mode": mode, "price": _safe_float(sell.get("price"), last_price), "qty": _safe_float(position.get("qty"), 0), "reason": reason})
                     fs.upsert_trading_position(symbol, {"status": "CLOSED", "closedAt": _now(), "closeReason": reason, "lastPrice": last_price})
+                    fs.update_trade_intent(sell_intent_id, {"status": "FILLED"})
                     event_type = "STOP_HIT" if reason == "stop_hit" else ("TAKE_HIT" if reason == "take_hit" else "POSITION_EXIT")
                     _notify(
                         fs,
@@ -687,9 +724,10 @@ def run_trade_pipeline() -> dict[str, Any]:
                         message=f"{symbol} fechado por {reason}",
                         symbol=symbol,
                         direction="SELL",
-                        payload={"reason": reason, "lastPrice": last_price, "mode": mode, "action_items": "Checar motivo da saída"},
+                        payload={"reason": reason, "lastPrice": last_price, "mode": mode, "orderId": sell_order_id, "action_items": "Checar motivo da saída"},
                     )
                 except Exception as exc:
+                    fs.update_trade_intent(sell_intent_id, {"status": "REJECTED", "error": str(exc)})
                     errors.append({"symbol": symbol, "error": str(exc)})
                     if "451" in str(exc) or (isinstance(exc, _requests.HTTPError) and getattr(getattr(exc, "response", None), "status_code", 0) == 451):
                         _mark_fail_safe(fs, alerts, owner_uid, "BINANCE_451")
@@ -771,100 +809,130 @@ def run_trade_pipeline() -> dict[str, Any]:
                         skipped += 1
                     continue
 
-                client = BinanceTradeClient(api_key=api_key, api_secret=api_secret, mode=mode)
-                order = client.place_order(
-                    symbol=symbol,
-                    side="BUY",
-                    order_type="LIMIT",
-                    quantity=qty,
-                    price=round(price, 8),
-                    timeInForce="GTC",
-                    newClientOrderId=_dedupe_order_id(run_id, symbol, "BUY", mode),
-                )
+                # BUY — write intent BEFORE placing order (audit + idempotency)
+                buy_intent_id = _dedupe_order_id(run_id, symbol, "BUY", mode)
+                atr_i = max(_safe_float(candidate.get("atr"), 0), price * 0.003)
+                stop_i = max(0.0, price - _safe_float(exit_cfg.get("stopAtrMult"), 1.5) * atr_i)
+                take_i = max(price, price + _safe_float(exit_cfg.get("takeAtrMult"), 2.5) * atr_i)
+                fs.write_trade_intent(buy_intent_id, {
+                    "runId": run_id,
+                    "symbol": symbol,
+                    "side": "BUY",
+                    "orderType": "LIMIT",
+                    "quantity": qty,
+                    "price": price,
+                    "stopPrice": stop_i,
+                    "takePrice": take_i,
+                    "mode": mode,
+                    "score": candidate.get("score"),
+                    "regime": candidate.get("regime"),
+                    "signal": candidate.get("signal"),
+                })
+                try:
+                    client = BinanceTradeClient(api_key=api_key, api_secret=api_secret, mode=mode)
+                    order = client.place_order(
+                        symbol=symbol,
+                        side="BUY",
+                        order_type="LIMIT",
+                        quantity=qty,
+                        price=round(price, 8),
+                        timeInForce="GTC",
+                        newClientOrderId=buy_intent_id,
+                    )
 
-                order_id = str(order.get("orderId") or _dedupe_order_id(run_id, symbol, "BUY", mode))
-                status = str(order.get("status") or "NEW")
-                fs.upsert_trading_order(order_id, {"runId": run_id, "symbol": symbol, "side": "BUY", "status": status, "mode": mode, "price": price, "qty": qty})
+                    order_id = str(order.get("orderId") or buy_intent_id)
+                    status = str(order.get("status") or "NEW")
+                    log_event(logger, "order_submitted", run_id=run_id, symbol=symbol, mode=mode, order_id=order_id, status=status)
+                    fs.update_trade_intent(buy_intent_id, {"status": "SUBMITTED", "orderId": order_id, "orderStatus": status})
+                    fs.upsert_trading_order(order_id, {"runId": run_id, "symbol": symbol, "side": "BUY", "status": status, "mode": mode, "price": price, "qty": qty})
 
-                atr = max(_safe_float(candidate.get("atr"), 0), price * 0.003)
-                stop_price = max(0.0, price - _safe_float(exit_cfg.get("stopAtrMult"), 1.5) * atr)
-                take_price = max(price, price + _safe_float(exit_cfg.get("takeAtrMult"), 2.5) * atr)
-                stop_limit = max(0.0, stop_price * 0.999)
+                    atr = max(_safe_float(candidate.get("atr"), 0), price * 0.003)
+                    stop_price = max(0.0, price - _safe_float(exit_cfg.get("stopAtrMult"), 1.5) * atr)
+                    take_price = max(price, price + _safe_float(exit_cfg.get("takeAtrMult"), 2.5) * atr)
+                    stop_limit = max(0.0, stop_price * 0.999)
 
-                oco_status = "DISABLED"
-                if bool(exit_cfg.get("useOCO", True)):
-                    try:
-                        oco = client.place_oco_order(
-                            symbol=symbol,
-                            side="SELL",
-                            quantity=qty,
-                            price=round(take_price, 8),
-                            stop_price=round(stop_price, 8),
-                            stop_limit_price=round(stop_limit, 8),
-                            listClientOrderId=_dedupe_order_id(run_id, symbol, "OCO", mode),
-                        )
-                        oco_status = "OK" if oco else "UNKNOWN"
-                    except Exception as exc:
-                        errors.append({"symbol": symbol, "error": f"OCO_FAIL: {exc}"})
-                        _mark_fail_safe(fs, alerts, owner_uid, f"OCO_FAIL_{symbol}")
-                        return {
-                            "ok": False,
-                            "runId": run_id,
-                            "mode": mode,
-                            "enabled": False,
-                            "executed": executed,
-                            "skipped": skipped,
-                            "candidates": len(candidates),
-                            "errors": errors[:5],
-                            "error": "OCO_FAILSAFE_TRIGGERED",
-                        }
+                    oco_status = "DISABLED"
+                    if bool(exit_cfg.get("useOCO", True)):
+                        try:
+                            oco = client.place_oco_order(
+                                symbol=symbol,
+                                side="SELL",
+                                quantity=qty,
+                                price=round(take_price, 8),
+                                stop_price=round(stop_price, 8),
+                                stop_limit_price=round(stop_limit, 8),
+                                listClientOrderId=_dedupe_order_id(run_id, symbol, "OCO", mode),
+                            )
+                            oco_status = "OK" if oco else "UNKNOWN"
+                            oco_list_id = str((oco or {}).get("orderListId", ""))
+                            fs.update_trade_intent(buy_intent_id, {"status": "FILL_PENDING", "ocoStatus": oco_status, "ocoOrderListId": oco_list_id})
+                        except Exception as exc:
+                            fs.update_trade_intent(buy_intent_id, {"status": "OCO_FAILED", "error": f"OCO_FAIL: {exc}"})
+                            errors.append({"symbol": symbol, "error": f"OCO_FAIL: {exc}"})
+                            _mark_fail_safe(fs, alerts, owner_uid, f"OCO_FAIL_{symbol}")
+                            return {
+                                "ok": False,
+                                "runId": run_id,
+                                "mode": mode,
+                                "enabled": False,
+                                "executed": executed,
+                                "skipped": skipped,
+                                "candidates": len(candidates),
+                                "errors": errors[:5],
+                                "error": "OCO_FAILSAFE_TRIGGERED",
+                            }
 
-                fs.upsert_trading_position(
-                    symbol,
-                    {
-                        "mode": mode,
-                        "status": "OPEN",
-                        "qty": qty,
-                        "avgEntry": price,
-                        "lastPrice": price,
-                        "pnlUnrealized": 0.0,
-                        "allocationPct": (notional / max(equity, 1e-9)) * 100.0,
-                        "stopPrice": stop_price,
-                        "takePrice": take_price,
-                        "ocoStatus": oco_status,
-                        "openedAt": _now(),
-                        "initialRisk": max(price - stop_price, 1e-9),
-                    },
-                )
-
-                bq.insert_trade_orders(
-                    [
+                    fs.upsert_trading_position(
+                        symbol,
                         {
-                            "run_id": run_id,
-                            "symbol": symbol,
-                            "side": "BUY",
-                            "order_type": "LIMIT",
+                            "intentId": buy_intent_id,
                             "mode": mode,
-                            "status": status,
-                            "error": "",
-                            "created_at": _now().isoformat(),
-                        }
-                    ]
-                )
-                executed += 1
-                fs.increment_daily_trade_counter(date_key, 1)
-                _notify(
-                    fs,
-                    alerts,
-                    owner_uid,
-                    event_type="TRADE_EXECUTED",
-                    priority="P1",
-                    title="TRADE EXECUTADO",
-                    message=f"{symbol} BUY {mode}",
-                    symbol=symbol,
-                    direction="BUY",
-                    payload={"symbol": symbol, "mode": mode, "action_items": "Monitorar stop/take"},
-                )
+                            "status": "OPEN",
+                            "qty": qty,
+                            "avgEntry": price,
+                            "lastPrice": price,
+                            "pnlUnrealized": 0.0,
+                            "allocationPct": (notional / max(equity, 1e-9)) * 100.0,
+                            "stopPrice": stop_price,
+                            "takePrice": take_price,
+                            "ocoStatus": oco_status,
+                            "openedAt": _now(),
+                            "initialRisk": max(price - stop_price, 1e-9),
+                        },
+                    )
+
+                    bq.insert_trade_orders(
+                        [
+                            {
+                                "run_id": run_id,
+                                "symbol": symbol,
+                                "side": "BUY",
+                                "order_type": "LIMIT",
+                                "mode": mode,
+                                "status": status,
+                                "error": "",
+                                "created_at": _now().isoformat(),
+                            }
+                        ]
+                    )
+                    executed += 1
+                    fs.increment_daily_trade_counter(date_key, 1)
+                    _notify(
+                        fs,
+                        alerts,
+                        owner_uid,
+                        event_type="TRADE_EXECUTED",
+                        priority="P1",
+                        title="TRADE EXECUTADO",
+                        message=f"{symbol} BUY {mode}",
+                        symbol=symbol,
+                        direction="BUY",
+                        payload={"symbol": symbol, "mode": mode, "orderId": order_id, "intentId": buy_intent_id, "action_items": "Monitorar stop/take"},
+                    )
+                except Exception as exc:
+                    if not str(exc).startswith("OCO_FAIL"):
+                        fs.update_trade_intent(buy_intent_id, {"status": "REJECTED", "error": str(exc)})
+                    raise
             except Exception as exc:
                 skipped += 1
                 err_str = str(exc)

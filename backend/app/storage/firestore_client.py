@@ -443,3 +443,20 @@ class FirestoreNotificationStorage:
             .limit(max(1, limit_size))
         )
         return [doc.to_dict() for doc in query.stream()]
+
+    def list_trade_intents(self, limit_size: int = 100, status: str | None = None) -> list[dict[str, Any]]:
+        """Lista trade intents com filtro opcional por status, ordenado por createdAt desc."""
+        query = self.client.collection("trade_intents")
+        if status:
+            query = query.where("status", "==", status)
+        try:
+            query = query.order_by("createdAt", direction=firestore.Query.DESCENDING)
+        except Exception:
+            pass
+        query = query.limit(max(1, limit_size))
+        docs = []
+        for doc in query.stream():
+            d = doc.to_dict() or {}
+            d.setdefault("intentId", doc.id)
+            docs.append(d)
+        return docs

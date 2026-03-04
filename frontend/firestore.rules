@@ -78,6 +78,11 @@ service cloud.firestore {
       allow write: if isAllowedAdmin();
     }
 
+    match /trade_intents/{intentId} {
+      allow read: if isSignedIn();
+      allow write: if false;  // somente o backend escreve via Service Account
+    }
+
     match /config/{docId} {
       allow read: if isAllowedAdmin();
       allow write: if isAllowedAdmin() || (docId == "trading_global" && ownerCreateTradingGlobal());

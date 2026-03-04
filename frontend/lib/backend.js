@@ -94,6 +94,14 @@ export async function fetchTradeStatus() {
   return getJson("/trade/status", true);
 }
 
+export async function fetchTradeIntents(params = {}) {
+  const qs = new URLSearchParams();
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.status) qs.set("status", params.status);
+  const query = qs.toString() ? `?${qs}` : "";
+  return getJson(`/trading/intents${query}`, true);
+}
+
 export async function triggerEmergencyStop() {
   return postJson("/api/trading/emergency-stop", {}, true);
 }

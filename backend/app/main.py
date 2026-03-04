@@ -297,6 +297,21 @@ def portfolio_balance(
     }
 
 
+@app.get("/trading/intents")
+def get_trade_intents(
+    limit: int = 100,
+    status: str | None = None,
+    auth_ctx: AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    """Retorna trilha de auditoria das trade intents (PENDING/SUBMITTED/FILLED/REJECTED/OCO_FAILED)."""
+    if limit < 1 or limit > 500:
+        limit = 100
+    settings = get_settings()
+    fs = FirestoreNotificationStorage(settings.gcp_project_id)
+    intents = fs.list_trade_intents(limit_size=limit, status=status or None)
+    return {"intents": intents, "total": len(intents)}
+
+
 @app.post("/api/trading/emergency-stop")
 def api_trading_emergency_stop(auth: AuthContext = Depends(require_auth)) -> dict[str, Any]:
     settings = get_settings()
