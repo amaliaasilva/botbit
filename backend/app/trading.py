@@ -132,6 +132,30 @@ def _notify(
         },
     )
 
+    # Email para P0 (fail-safe) e P1 (ordens executadas / saídas / stop)
+    if priority in ("P0", "P1") and bool((alerts or {}).get("emailEnabled", True)):
+        try:
+            webhook_url = get_secret("APP_SCRIPT_WEBHOOK_URL")
+            token = get_secret("ALERT_WEBHOOK_TOKEN")
+            owner_emails_raw = get_secret("ALERT_OWNER_EMAIL") or ""
+            email_list = [e.strip() for e in owner_emails_raw.split(",") if e.strip()]
+            alerter = AppScriptEmailAlerter(webhook_url, token)
+            if alerter.is_enabled() and email_list:
+                body = message
+                if payload:
+                    details = "\n".join(
+                        f"{k}: {v}" for k, v in payload.items()
+                        if k not in ("action_items", "explanation", "summary_leigo")
+                    )
+                    if details:
+                        body += f"\n\n{details}"
+                action = (payload or {}).get("action_items", "")
+                if action:
+                    body += f"\n\n👉 {action}"
+                alerter.send_email(email_list, f"[BotBit] {title}", body, payload or {})
+        except Exception:
+            pass
+
 
 def _load_universe(config: dict[str, Any], discover_rows: list[dict[str, Any]]) -> tuple[list[str], str, int]:
     """Returns (symbols, universe_mode, universe_size)."""

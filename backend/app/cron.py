@@ -162,6 +162,7 @@ def _send_alert_if_needed(
     symbol: str,
     previous: dict[str, Any] | None,
     latest: dict[str, Any],
+    min_score_threshold: int = 70,
 ) -> bool:
     latest_signal = latest.get("signal")
     latest_regime = latest.get("regime")
@@ -171,9 +172,9 @@ def _send_alert_if_needed(
     score_jump = current_score - previous_score
 
     should_send = (
-        latest_signal == "BUY"
+        (latest_signal == "BUY" and current_score >= min_score_threshold)
         or (previous_regime is not None and latest_regime != previous_regime)
-        or (previous is not None and score_jump >= 10)
+        or (previous is not None and score_jump >= 10 and current_score >= min_score_threshold)
     )
     if not should_send:
         return False
@@ -459,19 +460,51 @@ def run_score_pipeline() -> dict[str, Any]:
                     },
                 )
 
-            if symbol == settings.btc_symbol:
-                latest_for_alert = {**latest, "score": score, "regime": regime, "signal": signal}
-                if _send_alert_if_needed(
-                    storage,
-                    fs_storage,
-                    alerter,
-                    all_alert_emails,
-                    alert_owner_uid,
-                    symbol,
-                    previous,
-                    latest_for_alert,
-                ):
-                    alerts_sent += 1
+            # BTC: alerta a partir de score 70 | outros ativos: score ≥ 80 (evita spam)
+            alert_threshold = 70 if symbol == settings.btc_symbol else 80
+            latest_for_alert = {**latest, "score": score, "regime": regime, "signal": signal}
+            if _send_alert_if_needed(
+                storage,
+                fs_storage,
+                alerter,
+                all_alert_emails,
+                alert_owner_uid,
+                symbol,
+                previous,
+                latest_for_alert,
+                min_score_threshold=alert_threshold,
+            ):
+                alerts_sent += 1
+
+            # Near-entry: score 60-69, regime Alta → notificação in-app (sem email)
+            if (
+                fs_storage
+                and alert_owner_uid
+                and regime == "Alta"
+                and 60 <= score < 70
+                and signal == "WAIT"
+            ):
+                try:
+                    near_bucket = score // 5 * 5  # buckets de 5 em 5 para dedupar
+                    near_id = hashlib.sha256(f"near_entry|{symbol}|{near_bucket}".encode()).hexdigest()
+                    if not storage.has_alert(near_id):
+                        storage.insert_alert(near_id, symbol, "NEAR_ENTRY", datetime.now(timezone.utc))
+                        rsi_val = float(latest.get("rsi14") or 0)
+                        fs_storage.add_notification(
+                            alert_owner_uid,
+                            near_id,
+                            {
+                                "type": "NEAR_ENTRY",
+                                "symbol": symbol,
+                                "signal": "WAIT",
+                                "regime": regime,
+                                "score": score,
+                                "message": f"{symbol} próximo de sinal BUY — score={score}, regime={regime}, RSI={rsi_val:.1f}",
+                                "emailSent": False,
+                            },
+                        )
+                except Exception as exc:
+                    log_event(logger, "near_entry_alert_failed", symbol=symbol, error=str(exc))
 
             updated += 1
             log_event(logger, "score_ok", symbol=symbol, score=score, regime=regime, signal=signal)
