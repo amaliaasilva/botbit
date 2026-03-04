@@ -563,10 +563,13 @@ class FirestoreNotificationStorage:
         query = self.client.collection("trade_intents")
         if status:
             query = query.where("status", "==", status)
-        try:
-            query = query.order_by("createdAt", direction=firestore.Query.DESCENDING)
-        except Exception:
-            pass
+            # NOTE: Firestore requires a composite index for where+orderBy.
+            # Skip orderBy when filtering by status to avoid the index requirement.
+        else:
+            try:
+                query = query.order_by("createdAt", direction=firestore.Query.DESCENDING)
+            except Exception:
+                pass
         query = query.limit(max(1, limit_size))
         docs = []
         for doc in query.stream():

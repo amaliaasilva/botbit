@@ -516,12 +516,6 @@ def api_place_order(
     return result
 
 
-def internal_egress_ip() -> dict[str, Any]:
-    response = requests.get("https://ifconfig.me/ip", timeout=10)
-    response.raise_for_status()
-    return {"egressIp": response.text.strip()}
-
-
 def _get_egress_ip() -> str:
     """Best-effort egress IP; never raises."""
     try:
@@ -777,14 +771,6 @@ def cron_score(_: None = Depends(require_cron)) -> dict[str, Any]:
     started_at = datetime.utcnow().isoformat()
     result = run_score_pipeline()
     log_event(logger, "cron_score_finished", started_at=started_at, **result)
-    return result
-
-
-@app.post("/cron/run")
-def cron_run(_: None = Depends(require_cron)) -> dict[str, Any]:
-    started_at = datetime.utcnow().isoformat()
-    result = run_score_pipeline()
-    log_event(logger, "cron_run_finished", started_at=started_at, **result)
     return result
 
 

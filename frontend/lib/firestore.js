@@ -258,6 +258,17 @@ export async function updateTradingConfig(patch) {
   await setDoc(ref, { ...patch, updatedAt: serverTimestamp() }, { merge: true });
 }
 
+/**
+ * Patch a single nested field using Firestore dot-notation (safe deep merge).
+ * Example: patchTradingField("resting.enabled", true)
+ * Uses updateDoc so nested sibling fields are NOT overwritten.
+ */
+export async function patchTradingField(fieldPath, value) {
+  if (!db) return;
+  const ref = doc(db, "config", "trading_global");
+  await updateDoc(ref, { [fieldPath]: value, updatedAt: serverTimestamp() });
+}
+
 export async function emergencyStopTrading() {
   if (!db) return;
   const ref = doc(db, "config", "trading_global");

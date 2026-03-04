@@ -613,15 +613,23 @@ def _ensure_resting_order(
         for row in sorted_rows:
             sym = str(row.get("symbol", ""))
             mkt = market_map.get(sym) or {}
-            regime = str(mkt.get("regime") or row.get("regime") or "")
-            signal = str(mkt.get("signal") or row.get("signal") or "WAIT").upper()
-            score = _safe_float(mkt.get("score") or row.get("score"), 0)
+            km = row.get("keyMetrics") or {}
+            regime = str(mkt.get("regime") or km.get("regime") or row.get("regime") or "")
+            signal = str(mkt.get("signal") or km.get("signal") or row.get("signal") or "WAIT").upper()
+            score = _safe_float(mkt.get("score") or km.get("score") or row.get("score"), 0)
             potential = _safe_float(row.get("potentialScore"), 0)
-            volume = _safe_float(mkt.get("quoteVolume") or row.get("quoteVolume24h"), 0)
+            # volume: market_rows lack this field — fall back to quotes (volume24h ≈ USDT notional)
+            volume = _safe_float(
+                mkt.get("quoteVolume") or row.get("quoteVolume24h")
+                or (quote_map.get(sym) or {}).get("volume24h"),
+                0
+            )
             if (regime in allowed_regimes and signal in allowed_signals
                     and score >= min_score and potential >= min_potential and volume >= min_volume):
-                price_fb = _safe_float((quote_map.get(sym) or {}).get("price"), 0) or _safe_float(mkt.get("price"), 0)
-                atr_fb = max(_safe_float(mkt.get("atr14") or row.get("atr"), 0), price_fb * 0.003)
+                price_fb = _safe_float((quote_map.get(sym) or {}).get("price"), 0) or _safe_float(mkt.get("price_close") or mkt.get("price"), 0)
+                # atr14 from market_map; fall back to keyMetrics.atr_pct (percentage) × price
+                atr_pct_val = _safe_float(km.get("atr_pct"), 0) * price_fb
+                atr_fb = max(_safe_float(mkt.get("atr14") or row.get("atr"), 0), atr_pct_val, price_fb * 0.003)
                 selected_candidate = {
                     "symbol": sym, "price": price_fb, "atr": atr_fb,
                     "score": score, "potentialScore": potential,
@@ -634,7 +642,7 @@ def _ensure_resting_order(
         # ANCHOR
         for sym in anchor_symbols:
             mkt = market_map.get(sym) or {}
-            price_anchor = _safe_float((quote_map.get(sym) or {}).get("price"), 0) or _safe_float(mkt.get("price"), 0)
+            price_anchor = _safe_float((quote_map.get(sym) or {}).get("price"), 0) or _safe_float(mkt.get("price_close") or mkt.get("price"), 0)
             atr_anchor = max(_safe_float(mkt.get("atr14"), 0), price_anchor * 0.003)
             regime = str(mkt.get("regime") or "")
             signal = str(mkt.get("signal") or "WAIT").upper()

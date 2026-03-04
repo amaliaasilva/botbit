@@ -6,7 +6,7 @@ import { auth } from "../../lib/firebase";
 import { getUserSettings, updateUserSettings } from "../../lib/firestore";
 import { useRouter } from "next/navigation";
 import AppShell from "../../components/AppShell";
-import { emergencyStopTrading, subscribeTradingConfig, subscribeTradingState, updateTradingConfig, subscribeExecutorStatus, subscribePendingIntents, subscribeRestingIntents } from "../../lib/firestore";
+import { emergencyStopTrading, subscribeTradingConfig, subscribeTradingState, updateTradingConfig, patchTradingField, subscribeExecutorStatus, subscribePendingIntents, subscribeRestingIntents } from "../../lib/firestore";
 import { fetchBinanceValidate, fetchLiveGateStatus, triggerAlertTest, triggerRunDiscover, triggerRunScore } from "../../lib/backend";
 
 const TABS = [
@@ -98,11 +98,12 @@ export default function SettingsPage() {
     return () => unsub();
   }, [router]);
 
-  useEffect(() => subscribeTradingConfig((row) => setTradingConfig(row)), []);
-  useEffect(() => subscribeTradingState((row) => setTradingState(row)), []);
-  useEffect(() => subscribeExecutorStatus((s) => setExecutorStatus(s)), []);
-  useEffect(() => subscribePendingIntents((items) => setPendingIntents(items)), []);
-  useEffect(() => subscribeRestingIntents((items) => setRestingIntents(items)), []);
+  // Subscriptions só iniciam após uid estar disponível (evita permission-denied antes do auth resolver)
+  useEffect(() => { if (!uid) return; return subscribeTradingConfig((row) => setTradingConfig(row)); }, [uid]);
+  useEffect(() => { if (!uid) return; return subscribeTradingState((row) => setTradingState(row)); }, [uid]);
+  useEffect(() => { if (!uid) return; return subscribeExecutorStatus((s) => setExecutorStatus(s)); }, [uid]);
+  useEffect(() => { if (!uid) return; return subscribePendingIntents((items) => setPendingIntents(items)); }, [uid]);
+  useEffect(() => { if (!uid) return; return subscribeRestingIntents((items) => setRestingIntents(items)); }, [uid]);
 
   async function save() {
     if (!uid) return;
@@ -745,14 +746,14 @@ python tools/testnet_executor.py`}</pre>
             <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
               <button
                 className="btn"
-                onClick={() => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), enabled: true } })}
+                onClick={() => patchTradingField("resting.enabled", true)}
                 style={tradingConfig?.resting?.enabled ? { borderColor: "var(--good)", color: "var(--good)" } : {}}
               >
                 Ativar
               </button>
               <button
                 className="btn"
-                onClick={() => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), enabled: false } })}
+                onClick={() => patchTradingField("resting.enabled", false)}
                 style={!tradingConfig?.resting?.enabled ? { borderColor: "rgba(239,68,68,.4)", color: "#FCA5A5" } : {}}
               >
                 Desativar
@@ -766,7 +767,7 @@ python tools/testnet_executor.py`}</pre>
                 <input
                   type="number" step="0.001"
                   value={Number(tradingConfig?.resting?.discountPct ?? 0.008)}
-                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), discountPct: Number(e.target.value) } })}
+                  onChange={(e) => patchTradingField("resting.discountPct", Number(e.target.value))}
                 />
               </label>
               <label>
@@ -774,7 +775,7 @@ python tools/testnet_executor.py`}</pre>
                 <input
                   type="number" step="0.1"
                   value={Number(tradingConfig?.resting?.atrMult ?? 0.8)}
-                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), atrMult: Number(e.target.value) } })}
+                  onChange={(e) => patchTradingField("resting.atrMult", Number(e.target.value))}
                 />
               </label>
               <label>
@@ -782,7 +783,7 @@ python tools/testnet_executor.py`}</pre>
                 <input
                   type="number"
                   value={Number(tradingConfig?.resting?.refreshMinutes ?? 60)}
-                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), refreshMinutes: Number(e.target.value) } })}
+                  onChange={(e) => patchTradingField("resting.refreshMinutes", Number(e.target.value))}
                 />
               </label>
               <label>
@@ -790,7 +791,7 @@ python tools/testnet_executor.py`}</pre>
                 <input
                   type="number"
                   value={Number(tradingConfig?.resting?.maxOrderAgeMinutes ?? 360)}
-                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), maxOrderAgeMinutes: Number(e.target.value) } })}
+                  onChange={(e) => patchTradingField("resting.maxOrderAgeMinutes", Number(e.target.value))}
                 />
               </label>
               <label>
@@ -798,7 +799,7 @@ python tools/testnet_executor.py`}</pre>
                 <input
                   type="number" step="0.05"
                   value={Number(tradingConfig?.resting?.fallbackSizeMultiplier ?? 0.25)}
-                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), fallbackSizeMultiplier: Number(e.target.value) } })}
+                  onChange={(e) => patchTradingField("resting.fallbackSizeMultiplier", Number(e.target.value))}
                 />
               </label>
               <label>
@@ -806,7 +807,7 @@ python tools/testnet_executor.py`}</pre>
                 <input
                   type="text"
                   value={(tradingConfig?.resting?.anchorSymbolsIfNone || ["BTCUSDT", "ETHUSDT"]).join(",")}
-                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), anchorSymbolsIfNone: e.target.value.split(",").map(s => s.trim().toUpperCase()).filter(Boolean) } })}
+                  onChange={(e) => patchTradingField("resting.anchorSymbolsIfNone", e.target.value.split(",").map(s => s.trim().toUpperCase()).filter(Boolean))}
                 />
               </label>
             </div>

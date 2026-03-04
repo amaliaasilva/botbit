@@ -137,9 +137,9 @@ def _normalize_state(row: dict[str, Any]) -> tuple[int, str, str, str]:
         return score, regime, "WAIT", "INSUFFICIENT_DATA"
 
     if regime == "Baixa":
-        # Score já recebe -30 de penalty em resolve_score; não clicar em 59
-        # pois elimina diferenciação entre ativos em queda (ex.: 65 vs 35).
         signal = "AVOID"
+        # Cap score em 59 para evitar score alto com sinal AVOID (confuso para o usuário)
+        score = min(score, 59)
 
     # AVOID nunca pode virar BUY, mas mantém score real para o ranking.
     if signal == "BUY" and score < 70:
