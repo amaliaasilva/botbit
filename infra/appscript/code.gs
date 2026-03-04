@@ -85,6 +85,77 @@ function doGet(e) {
   });
 }
 
+function buildHtmlEmail_(subject, message, payload) {
+  var event = (payload && payload.event) || (payload && payload.type) || '';
+
+  // Cor do cabeçalho por tipo de evento
+  var colorMap = {
+    'BUY':              '#16a34a',  // verde
+    'TRADE_EXECUTED':   '#16a34a',
+    'NEAR_ENTRY':       '#d97706',  // amarelo
+    'SCORE_JUMP':       '#2563eb',  // azul
+    'REGIME_CHANGE':    '#7c3aed',  // roxo
+    'POSITION_EXIT':    '#ea580c',  // laranja
+    'STOP_HIT':         '#dc2626',  // vermelho
+    'TAKE_HIT':         '#16a34a',  // verde
+    'FAILSAFE':         '#dc2626',
+    'DISARM':           '#dc2626',
+    'TEST_ALERT':       '#6b7280',  // cinza
+  };
+  var headerColor = colorMap[event] || '#1e293b';
+
+  // Ícone por tipo
+  var iconMap = {
+    'BUY':              '🟢',
+    'TRADE_EXECUTED':   '✅',
+    'NEAR_ENTRY':       '🟡',
+    'SCORE_JUMP':       '📈',
+    'REGIME_CHANGE':    '🔄',
+    'POSITION_EXIT':    '🚪',
+    'STOP_HIT':         '🛑',
+    'TAKE_HIT':         '🎯',
+    'FAILSAFE':         '🚨',
+    'DISARM':           '🚨',
+    'TEST_ALERT':       '🔔',
+  };
+  var icon = iconMap[event] || '📊';
+
+  // Linhas de detalhe do payload
+  var skipKeys = {'token': 1, 'test': 1, 'action_items': 1, 'explanation': 1, 'summary_leigo': 1};
+  var rows = '';
+  if (payload) {
+    Object.keys(payload).forEach(function(k) {
+      if (skipKeys[k]) return;
+      var v = payload[k];
+      if (v === null || v === undefined || v === '') return;
+      rows += '<tr><td style="padding:4px 8px;color:#64748b;font-size:13px;">' + k + '</td>'
+            + '<td style="padding:4px 8px;font-size:13px;font-weight:600;">' + v + '</td></tr>';
+    });
+  }
+  var detailsBlock = rows
+    ? '<table style="width:100%;border-collapse:collapse;margin-top:12px;">' + rows + '</table>'
+    : '';
+
+  var actionItems = (payload && payload.action_items) ? payload.action_items : '';
+  var actionBlock = actionItems
+    ? '<div style="margin-top:16px;padding:10px 14px;background:#fef9c3;border-left:4px solid #eab308;border-radius:4px;font-size:13px;">👉 ' + actionItems + '</div>'
+    : '';
+
+  return '<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,sans-serif;">'
+    + '<div style="max-width:560px;margin:24px auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08);">'
+    + '<div style="background:' + headerColor + ';padding:20px 24px;">'
+    + '<div style="font-size:22px;font-weight:700;color:#fff;">' + icon + ' ' + subject + '</div>'
+    + '</div>'
+    + '<div style="padding:20px 24px;">'
+    + '<p style="margin:0 0 12px;font-size:15px;color:#1e293b;">' + message.replace(/\n/g, '<br>') + '</p>'
+    + detailsBlock
+    + actionBlock
+    + '</div>'
+    + '<div style="padding:12px 24px;background:#f8fafc;font-size:11px;color:#94a3b8;text-align:center;">'
+    + 'BotBit &bull; ' + new Date().toLocaleString('pt-BR') + '</div>'
+    + '</div></body></html>';
+}
+
 function doPost(e) {
   var props = PropertiesService.getScriptProperties();
   try {
@@ -114,7 +185,13 @@ function doPost(e) {
       return jsonResponse({ ok: false, error: 'toEmail_required' });
     }
 
-    MailApp.sendEmail(toEmail, subject, message);
+    var htmlBody = buildHtmlEmail_(subject, message, payload);
+    MailApp.sendEmail({
+      to: toEmail,
+      subject: subject,
+      body: message,          // fallback texto puro
+      htmlBody: htmlBody,
+    });
     appendSheetLog_(subject, toEmail, message, payload);
 
     return jsonResponse({ ok: true, sentTo: toEmail });
