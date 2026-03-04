@@ -646,10 +646,10 @@ function DiscoverTab({ uid, mode = "PAPER" }) {
   const [discoverSettings, setDiscoverSettings] = useState({ topN: 20, rotateHours: 1 });
   const [cronDiscoverStatus, setCronDiscoverStatus] = useState(null);
 
-  useEffect(() => subscribeDiscoverSettings((s) => setDiscoverSettings(s || { topN: 20, rotateHours: 1 })), []);
-  useEffect(() => subscribeSystemStatus("cron_discover", setCronDiscoverStatus), []);
+  useEffect(() => { if (!uid) return; return subscribeDiscoverSettings((s) => setDiscoverSettings(s || { topN: 20, rotateHours: 1 })); }, [uid]);
+  useEffect(() => { if (!uid) return; return subscribeSystemStatus("cron_discover", setCronDiscoverStatus); }, [uid]);
 
-  useEffect(() => { return subscribeDiscoverLatest(discoverSettings.topN, (rows) => setItems(rows)); }, [discoverSettings.topN]);
+  useEffect(() => { if (!uid) return; return subscribeDiscoverLatest(discoverSettings.topN, (rows) => setItems(rows)); }, [uid, discoverSettings.topN]);
 
   useEffect(() => {
     if (!uid) return () => {};

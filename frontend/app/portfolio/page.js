@@ -34,6 +34,7 @@ function Collapsible({ title, badge, badgeClass, count, chips, defaultOpen = tru
 
 export default function PortfolioPage() {
   const [loading, setLoading] = useState(true);
+  const [authed, setAuthed] = useState(false);
   const [state, setState] = useState(null);
   const [liveData, setLiveData] = useState(null);
   const [liveLoading, setLiveLoading] = useState(false);
@@ -63,6 +64,7 @@ export default function PortfolioPage() {
     if (!auth) return;
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) { router.push("/login"); return; }
+      setAuthed(true);
       setLoading(false);
       loadData();
     });
@@ -70,8 +72,9 @@ export default function PortfolioPage() {
   }, [router, loadData]);
 
   useEffect(() => {
+    if (!authed) return;
     return subscribeTradingState((row) => setState(row));
-  }, []);
+  }, [authed]);
 
   const liveCashUSDT = Number(balanceLive?.usdtFree ?? 0);
   const liveTotalAssets = balanceLive?.totalAssets ?? 0;

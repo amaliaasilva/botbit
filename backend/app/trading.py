@@ -322,6 +322,21 @@ def _symbol_filters(exchange_info: dict[str, Any], symbol: str) -> tuple[float, 
     return step_size, min_notional
 
 
+def _get_tick_size(exchange_info: dict[str, Any], symbol: str) -> float:
+    """Return PRICE_FILTER tickSize for the symbol (default 0.00000001)."""
+    symbols = exchange_info.get("symbols") or []
+    for item in symbols:
+        if str(item.get("symbol") or "").upper() == symbol:
+            status = str(item.get("status") or "TRADING")
+            if status != "TRADING":
+                return -1.0  # sentinel: symbol not tradeable
+            for f in item.get("filters") or []:
+                if str(f.get("filterType") or "") == "PRICE_FILTER":
+                    return _safe_float(f.get("tickSize"), 0.00000001)
+            return 0.00000001
+    return 0.00000001
+
+
 def _round_step(quantity: float, step: float) -> float:
     if step <= 0:
         return quantity
@@ -678,6 +693,15 @@ def _ensure_resting_order(
         step, min_notional_exchange = _symbol_filters(exchange_info, sym)
     except Exception:
         step, min_notional_exchange = 0.001, 5.0
+
+    # Verify symbol is actively trading and get tick size for price rounding
+    tick_size = _get_tick_size(exchange_info, sym)
+    if tick_size < 0:
+        return {"action": "symbol_not_trading", "symbol": sym}
+    limit_price = _round_step(limit_price, tick_size) if tick_size > 0 else round(limit_price, 8)
+    if limit_price <= 0:
+        return {"action": "price_round_zero", "symbol": sym}
+
     min_notional = max(_safe_float(config.get("minNotionalUSDT"), 10), min_notional_exchange)
     if notional < min_notional:
         notional = min_notional
@@ -701,9 +725,9 @@ def _ensure_resting_order(
         "intentType": "RESTING_LIMIT",
         "decisionProfile": decision_profile,
         "quantity": qty,
-        "price": round(limit_price, 8),
-        "stopPrice": round(stop_i, 8),
-        "takePrice": round(take_i, 8),
+        "price": limit_price,
+        "stopPrice": _round_step(stop_i, tick_size) if tick_size > 0 else round(stop_i, 8),
+        "takePrice": _round_step(take_i, tick_size) if tick_size > 0 else round(take_i, 8),
         "mode": mode,
         "score": selected_candidate.get("score"),
         "regime": selected_candidate.get("regime"),
@@ -730,7 +754,7 @@ def _ensure_resting_order(
             side="BUY",
             order_type="LIMIT",
             quantity=qty,
-            price=round(limit_price, 8),
+            price=limit_price,  # already rounded to tick_size
             timeInForce="GTC",
             newClientOrderId=resting_intent_id,
         )
@@ -744,7 +768,7 @@ def _ensure_resting_order(
             event_type="RESTING_ORDER_PLACED",
             priority="P2",
             title=f"Resting Order — {sym}",
-            message=f"LIMIT BUY GTC em {sym} @ {round(limit_price, 8)} [{decision_profile}]",
+            message=f"LIMIT BUY GTC em {sym} @ {limit_price} [{decision_profile}]",
             symbol=sym,
             direction="BUY",
             payload={
