@@ -1,41 +1,14 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { fetchTradeIntents, fetchTradeStatus, triggerEmergencyStop } from "@/lib/backend";
+import { onAuthStateChanged } from "firebase/auth";
+import { auth } from "../../lib/firebase";
+import { useRouter } from "next/navigation";
+import AppShell from "../../components/AppShell";
+import IAExplainPanel from "../../components/ui/IAExplainPanel";
+import { fetchTradeIntents, fetchTradeStatus, triggerEmergencyStop, fetchExplain } from "../../lib/backend";
 
-// ── status badge colors ────────────────────────────────────────────────────────
-const STATUS_COLORS = {
-  PENDING: "bg-yellow-100 text-yellow-800",
-  SUBMITTED: "bg-blue-100 text-blue-800",
-  FILL_PENDING: "bg-indigo-100 text-indigo-800",
-  FILLED: "bg-green-100 text-green-800",
-  REJECTED: "bg-red-100 text-red-800",
-  CANCELLED: "bg-gray-200 text-gray-700",
-  OCO_FAILED: "bg-orange-100 text-orange-800",
-};
-
-function Badge({ status }) {
-  const cls = STATUS_COLORS[status] || "bg-gray-100 text-gray-600";
-  return (
-    <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-semibold whitespace-nowrap ${cls}`}>
-      {status || "—"}
-    </span>
-  );
-}
-
-function ModeBadge({ mode }) {
-  if (!mode) return <span className="text-gray-400">—</span>;
-  const cls =
-    mode === "LIVE"
-      ? "bg-red-100 text-red-700 border border-red-300"
-      : "bg-green-100 text-green-700 border border-green-300";
-  return (
-    <span className={`inline-block rounded px-2 py-0.5 text-xs font-bold ${cls}`}>
-      {mode}
-    </span>
-  );
-}
-
+// ── helpers ───────────────────────────────────────────────────────────────────
 function fmt(val, digits = 6) {
   if (val == null || val === "") return "—";
   const n = Number(val);
@@ -53,24 +26,148 @@ function fmtDate(val) {
   }
 }
 
-function KpiChip({ label, value, sub }) {
+const STATUS_STYLE = {
+  PENDING:      { color: "var(--warn)",   bg: "var(--warn-dim)" },
+  SUBMITTED:    { color: "var(--accent)", bg: "var(--accent-dim)" },
+  FILL_PENDING: { color: "var(--accent)", bg: "var(--accent-dim)" },
+  FILLED:       { color: "var(--good)",   bg: "var(--good-dim)" },
+  REJECTED:     { color: "var(--danger)", bg: "var(--danger-dim)" },
+  CANCELLED:    { color: "var(--muted)",  bg: "rgba(255,255,255,.05)" },
+  OCO_FAILED:   { color: "var(--warn)",   bg: "var(--warn-dim)" },
+};
+
+function StatusBadge({ status }) {
+  const s = STATUS_STYLE[status] || { color: "var(--muted)", bg: "rgba(255,255,255,.05)" };
   return (
-    <div className="rounded-xl border bg-white px-5 py-4 shadow-sm min-w-[130px]">
-      <p className="text-xs text-gray-500 uppercase tracking-wide">{label}</p>
-      <p className="mt-1 text-xl font-bold text-gray-900 truncate">{value ?? "—"}</p>
-      {sub && <p className="text-xs text-gray-400 mt-0.5">{sub}</p>}
-    </div>
+    <span style={{
+      fontSize: "var(--fs-xs)", fontWeight: 600,
+      padding: "3px 9px", borderRadius: 999,
+      color: s.color, background: s.bg,
+      border: `1px solid ${s.color}44`,
+      whiteSpace: "nowrap",
+    }}>
+      {status || "—"}
+    </span>
   );
 }
 
+function ModeBadge({ mode }) {
+  if (!mode) return <span style={{ color: "var(--muted)" }}>—</span>;
+  const isLive = mode === "LIVE";
+  return (
+    <span style={{
+      fontSize: "var(--fs-xs)", fontWeight: 700,
+      padding: "3px 8px", borderRadius: 6,
+      color: isLive ? "#FCA5A5" : "#86EFAC",
+      background: isLive ? "rgba(239,68,68,.14)" : "rgba(34,197,94,.14)",
+      border: `1px solid ${isLive ? "rgba(239,68,68,.35)" : "rgba(34,197,94,.35)"}`,
+    }}>
+      {mode}
+    </span>
+  );
+}
+
+// ── IA Explain por linha ──────────────────────────────────────────────────────
+function IntentExplainRow({ intent, onClose }) {
+  const [state, setState] = useState("loading");
+  const [explain, setExplain] = useState(null);
+
+  useEffect(() => {
+    if (!intent?.symbol) return;
+    let cancelled = false;
+    setState("loading");
+    fetchExplain(intent.symbol)
+      .then((res) => { if (!cancelled) { setExplain(res); setState("done"); } })
+      .catch((e) => { if (!cancelled) { setExplain({ error: e.message }); setState("error"); } });
+    return () => { cancelled = true; };
+  }, [intent?.symbol]);
+
+  return (
+    <tr>
+      <td colSpan={12} style={{ padding: 0, background: "var(--surface2)" }}>
+        <div style={{
+          margin: "0 12px 12px",
+          padding: "16px 20px",
+          borderLeft: "3px solid var(--accent)",
+          borderRadius: "0 var(--r-sm) var(--r-sm) 0",
+          background: "var(--surface)",
+        }}>
+          {/* cabeçalho */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+            <div>
+              <span style={{ fontSize: "var(--fs-sm)", fontWeight: 700, color: "var(--text)" }}>
+                IA — Por que {intent.side === "BUY" ? "comprou" : "vendeu"} {intent.symbol}?
+              </span>
+              <div style={{ fontSize: "var(--fs-xs)", color: "var(--muted)", marginTop: 3 }}>
+                Score {intent.score != null ? `${Number(intent.score).toFixed(0)}/100` : "—"} ·
+                Regime {intent.regime ?? "—"} ·
+                Sinal {intent.signal ?? "—"} ·
+                {fmtDate(intent.createdAt)}
+              </div>
+            </div>
+            <button className="btn" style={{ padding: "3px 10px", fontSize: "var(--fs-xs)", marginLeft: 12 }} onClick={onClose}>
+              Fechar ✕
+            </button>
+          </div>
+
+          {/* chips de contexto */}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+            <ModeBadge mode={intent.mode} />
+            {intent.price    && <span className="chip">entry {fmt(intent.price, 2)}</span>}
+            {intent.stopPrice && <span className="chip" style={{ color: "var(--danger)" }}>stop {fmt(intent.stopPrice, 2)}</span>}
+            {intent.takePrice && <span className="chip" style={{ color: "var(--good)"   }}>take {fmt(intent.takePrice, 2)}</span>}
+            {intent.quantity  && <span className="chip">qty {fmt(intent.quantity, 5)}</span>}
+          </div>
+
+          {state === "loading" && (
+            <p style={{ color: "var(--muted)", fontSize: "var(--fs-sm)" }}>⟳ Consultando Gemini…</p>
+          )}
+          {state === "error" && (
+            <p style={{ color: "var(--danger)", fontSize: "var(--fs-sm)" }}>
+              Erro: {explain?.error}
+            </p>
+          )}
+          {state === "done" && explain && (
+            <IAExplainPanel
+              leigo={explain.leigo || []}
+              intermediario={explain.intermediario}
+              tecnico={explain.tecnico}
+              significado={explain.significado}
+              riscoPrincipal={explain.riscoPrincipal}
+              condicaoMudar={explain.condicaoMudar}
+              source={explain.source}
+            />
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// ── main page ─────────────────────────────────────────────────────────────────
+const FILTERS = ["ALL", "PENDING", "SUBMITTED", "FILL_PENDING", "FILLED", "REJECTED", "OCO_FAILED", "CANCELLED"];
+
 export default function TradingPage() {
+  const [authed, setAuthed] = useState(false);
   const [intents, setIntents] = useState([]);
-  const [status, setStatus] = useState(null);
+  const [botStatus, setBotStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [stopping, setStopping] = useState(false);
   const [stopMsg, setStopMsg] = useState(null);
   const [filter, setFilter] = useState("ALL");
+  const [expandedId, setExpandedId] = useState(null);
+  const router = useRouter();
+
+  // auth gate
+  useEffect(() => {
+    if (!auth) return;
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (!user) { router.push("/login"); return; }
+      setAuthed(true);
+    });
+    return () => unsub();
+  }, [router]);
 
   const load = useCallback(async () => {
     try {
@@ -79,7 +176,7 @@ export default function TradingPage() {
         fetchTradeStatus().catch(() => null),
       ]);
       setIntents(intentData?.intents || []);
-      setStatus(statusData);
+      setBotStatus(statusData);
       setError(null);
     } catch (e) {
       setError(e.message);
@@ -89,17 +186,19 @@ export default function TradingPage() {
   }, []);
 
   useEffect(() => {
+    if (!authed) return;
     load();
     const id = setInterval(load, 30_000);
     return () => clearInterval(id);
-  }, [load]);
+  }, [authed, load]);
 
   const handleStop = async () => {
     if (!confirm("Confirma EMERGENCY STOP? O bot será desativado imediatamente.")) return;
     setStopping(true);
     try {
       const r = await triggerEmergencyStop();
-      setStopMsg(r?.message || "Bot desativado.");
+      setStopMsg(r?.message || "Bot desativado com sucesso.");
+      load();
     } catch (e) {
       setStopMsg(`Erro: ${e.message}`);
     } finally {
@@ -107,160 +206,222 @@ export default function TradingPage() {
     }
   };
 
-  const filters = ["ALL", "PENDING", "SUBMITTED", "FILL_PENDING", "FILLED", "REJECTED", "OCO_FAILED", "CANCELLED"];
   const visible = filter === "ALL" ? intents : intents.filter((i) => i.status === filter);
-
-  // aggregate KPIs
-  const kpiTotal = intents.length;
-  const kpiFilled = intents.filter((i) => i.status === "FILLED").length;
+  const kpiFilled   = intents.filter((i) => i.status === "FILLED").length;
   const kpiRejected = intents.filter((i) => i.status === "REJECTED").length;
-  const kpiPending = intents.filter((i) => ["PENDING", "SUBMITTED", "FILL_PENDING"].includes(i.status)).length;
-  const kpiMode = status?.mode || "—";
-  const kpiEnabled = status?.enabled != null ? (status.enabled ? "ATIVO" : "PARADO") : "—";
+  const kpiPending  = intents.filter((i) => ["PENDING", "SUBMITTED", "FILL_PENDING"].includes(i.status)).length;
+  const kpiMode     = botStatus?.mode || "—";
+  const kpiEnabled  = botStatus?.enabled != null ? (botStatus.enabled ? "ATIVO" : "PARADO") : "—";
+  const hasSellRejected = intents.some((i) => i.side === "SELL" && i.status === "REJECTED");
 
   return (
-    <main className="min-h-screen bg-gray-50">
-      <div className="max-w-7xl mx-auto px-4 py-8 space-y-8">
-        {/* ── HEADER ──────────────────────────────────────────────────── */}
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">Trading</h1>
-            <p className="text-sm text-gray-500 mt-0.5">Trilha de auditoria das ordens e intents</p>
-          </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={load}
-              className="rounded-lg border bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 shadow-sm"
-            >
-              Atualizar
+    <AppShell title="Trading" subtitle="Trilha de auditoria de ordens e intents">
+
+      {/* ── KPIs ── */}
+      <div className="kpi-grid" style={{ marginBottom: 16 }}>
+        <div className="kpi-card">
+          <span className="kpi-card-label">Modo Bot</span>
+          <span className="kpi-card-value" style={{ fontSize: "var(--fs-lg)" }}>{kpiMode}</span>
+        </div>
+        <div className="kpi-card">
+          <span className="kpi-card-label">Status Bot</span>
+          <span className="kpi-card-value" style={{
+            fontSize: "var(--fs-lg)",
+            color: kpiEnabled === "ATIVO" ? "var(--good)" : "var(--danger)",
+          }}>
+            {kpiEnabled}
+          </span>
+        </div>
+        <div className="kpi-card">
+          <span className="kpi-card-label">Total Intents</span>
+          <span className="kpi-card-value">{intents.length}</span>
+        </div>
+        <div className="kpi-card">
+          <span className="kpi-card-label">Preenchidas</span>
+          <span className="kpi-card-value" style={{ color: "var(--good)" }}>{kpiFilled}</span>
+        </div>
+        <div className="kpi-card">
+          <span className="kpi-card-label">Pendentes</span>
+          <span className="kpi-card-value" style={{ color: "var(--warn)" }}>{kpiPending}</span>
+        </div>
+        <div className="kpi-card">
+          <span className="kpi-card-label">Rejeitadas</span>
+          <span className="kpi-card-value" style={{ color: kpiRejected > 0 ? "var(--danger)" : "var(--muted)" }}>
+            {kpiRejected}
+          </span>
+        </div>
+      </div>
+
+      {/* ── alertas ── */}
+      {hasSellRejected && (
+        <div className="card" style={{ marginBottom: 12, borderColor: "rgba(239,68,68,.35)", background: "var(--danger-dim)" }}>
+          <p style={{ margin: 0, fontSize: "var(--fs-sm)", color: "#FCA5A5" }}>
+            <strong>Atenção:</strong> há intents de SELL com status REJECTED. Verifique posições abertas manualmente.
+          </p>
+        </div>
+      )}
+      {stopMsg && (
+        <div className="card" style={{ marginBottom: 12, borderColor: "rgba(245,158,11,.3)", background: "var(--warn-dim)" }}>
+          <p style={{ margin: 0, fontSize: "var(--fs-sm)", color: "var(--warn)" }}>{stopMsg}</p>
+        </div>
+      )}
+
+      {/* ── tabela de intents ── */}
+      <div className="card">
+        {/* toolbar */}
+        <div className="card-title" style={{ marginBottom: 14, alignItems: "flex-start", flexWrap: "wrap", gap: 10 }}>
+          <strong style={{ color: "var(--text)" }}>Trade Intents</strong>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+              {FILTERS.map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setFilter(f)}
+                  className="chip"
+                  style={{
+                    cursor: "pointer",
+                    fontWeight: filter === f ? 700 : 500,
+                    background: filter === f ? "var(--accent-dim)" : undefined,
+                    color: filter === f ? "var(--accent)" : undefined,
+                    borderColor: filter === f ? "rgba(79,142,247,.4)" : undefined,
+                    transition: "all var(--t)",
+                  }}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
+            <button className="btn" onClick={load} style={{ padding: "5px 14px", fontSize: "var(--fs-xs)" }}>
+              ↺ Atualizar
             </button>
             <button
+              className="btn"
               onClick={handleStop}
               disabled={stopping}
-              className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50 shadow-sm"
+              style={{
+                padding: "5px 14px", fontSize: "var(--fs-xs)",
+                color: "#FCA5A5", borderColor: "rgba(239,68,68,.4)",
+                background: "rgba(239,68,68,.1)",
+                opacity: stopping ? 0.5 : 1,
+              }}
             >
               {stopping ? "Parando…" : "⛔ Emergency Stop"}
             </button>
           </div>
         </div>
 
-        {stopMsg && (
-          <div className="rounded-lg bg-yellow-50 border border-yellow-300 text-yellow-800 px-4 py-3 text-sm">
-            {stopMsg}
-          </div>
-        )}
-
-        {/* ── KPIs ───────────────────────────────────────────────────── */}
-        <div className="flex flex-wrap gap-3">
-          <KpiChip label="Modo" value={kpiMode} />
-          <KpiChip label="Status Bot" value={kpiEnabled} />
-          <KpiChip label="Total Intents" value={kpiTotal} />
-          <KpiChip label="Preenchidas" value={kpiFilled} />
-          <KpiChip label="Pendentes" value={kpiPending} />
-          <KpiChip label="Rejeitadas" value={kpiRejected} />
-        </div>
-
-        {/* ── INTENTS TABLE ──────────────────────────────────────────── */}
-        <section className="rounded-2xl border bg-white shadow-sm overflow-hidden">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 px-6 py-4 border-b">
-            <h2 className="font-semibold text-gray-900">Trade Intents</h2>
-            <div className="flex flex-wrap gap-1.5">
-              {filters.map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setFilter(f)}
-                  className={`rounded-full px-3 py-0.5 text-xs font-medium border transition-colors ${
-                    filter === f
-                      ? "bg-gray-900 text-white border-gray-900"
-                      : "bg-white text-gray-600 border-gray-300 hover:bg-gray-50"
-                  }`}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {loading ? (
-            <p className="px-6 py-8 text-sm text-gray-400 text-center">Carregando…</p>
-          ) : error ? (
-            <p className="px-6 py-8 text-sm text-red-500 text-center">{error}</p>
-          ) : visible.length === 0 ? (
-            <p className="px-6 py-8 text-sm text-gray-400 text-center">Nenhuma intent encontrada.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-sm">
-                <thead className="bg-gray-50 text-xs uppercase tracking-wider text-gray-500">
-                  <tr>
-                    {["Hora", "Símbolo", "Lado", "Modo", "Status", "Qtd", "Preço", "Stop", "Take", "OrderId", "Run"].map(
-                      (h) => (
-                        <th key={h} className="px-4 py-3 text-left font-semibold whitespace-nowrap">
-                          {h}
-                        </th>
-                      )
-                    )}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {visible.map((intent, idx) => (
-                    <tr key={intent.intentId || idx} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-4 py-2.5 whitespace-nowrap text-gray-500 text-xs">
+        {loading ? (
+          <p style={{ color: "var(--muted)", fontSize: "var(--fs-sm)", textAlign: "center", padding: "24px 0" }}>
+            Carregando…
+          </p>
+        ) : error ? (
+          <p style={{ color: "var(--danger)", fontSize: "var(--fs-sm)", textAlign: "center", padding: "24px 0" }}>
+            {error}
+          </p>
+        ) : visible.length === 0 ? (
+          <p style={{ color: "var(--muted)", fontSize: "var(--fs-sm)", textAlign: "center", padding: "24px 0" }}>
+            Nenhuma intent encontrada.
+          </p>
+        ) : (
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Hora</th>
+                  <th>Símbolo</th>
+                  <th>Lado</th>
+                  <th>Modo</th>
+                  <th>Status</th>
+                  <th style={{ textAlign: "right" }}>Qtd</th>
+                  <th style={{ textAlign: "right" }}>Preço</th>
+                  <th style={{ textAlign: "right" }}>Stop</th>
+                  <th style={{ textAlign: "right" }}>Take</th>
+                  <th style={{ textAlign: "right" }}>Score</th>
+                  <th>OrderId</th>
+                  <th>IA</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map((intent, idx) => {
+                  const id = intent.intentId || `${intent.symbol}-${idx}`;
+                  const isExpanded = expandedId === id;
+                  return [
+                    <tr
+                      key={id}
+                      style={{ cursor: "pointer" }}
+                      onClick={() => setExpandedId(isExpanded ? null : id)}
+                    >
+                      <td style={{ whiteSpace: "nowrap", color: "var(--muted)", fontSize: "var(--fs-xs)" }}>
                         {fmtDate(intent.createdAt)}
                       </td>
-                      <td className="px-4 py-2.5 font-semibold text-gray-900 whitespace-nowrap">
-                        {intent.symbol || "—"}
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <span
-                          className={`font-bold ${
-                            intent.side === "BUY" ? "text-green-600" : "text-red-600"
-                          }`}
-                        >
+                      <td className="asset">{intent.symbol || "—"}</td>
+                      <td>
+                        <span style={{ fontWeight: 700, color: intent.side === "BUY" ? "var(--good)" : "var(--danger)" }}>
                           {intent.side || "—"}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5">
-                        <ModeBadge mode={intent.mode} />
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <Badge status={intent.status} />
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-gray-700">
+                      <td><ModeBadge mode={intent.mode} /></td>
+                      <td><StatusBadge status={intent.status} /></td>
+                      <td style={{ textAlign: "right", fontFamily: "var(--font-mono)", color: "var(--text-secondary)" }}>
                         {fmt(intent.quantity, 5)}
                       </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-gray-700">
+                      <td style={{ textAlign: "right", fontFamily: "var(--font-mono)", color: "var(--text-secondary)" }}>
                         {fmt(intent.price, 2)}
                       </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-red-400">
+                      <td style={{ textAlign: "right", fontFamily: "var(--font-mono)", color: "var(--danger)", opacity: 0.8 }}>
                         {fmt(intent.stopPrice, 2)}
                       </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-green-500">
+                      <td style={{ textAlign: "right", fontFamily: "var(--font-mono)", color: "var(--good)", opacity: 0.8 }}>
                         {fmt(intent.takePrice, 2)}
                       </td>
-                      <td className="px-4 py-2.5 text-xs text-gray-400 font-mono truncate max-w-[120px]">
+                      <td style={{ textAlign: "right" }}>
+                        {intent.score != null ? (
+                          <span style={{
+                            fontSize: "var(--fs-xs)", fontWeight: 700,
+                            color: Number(intent.score) >= 70 ? "var(--good)" : Number(intent.score) >= 45 ? "var(--warn)" : "var(--muted)",
+                          }}>
+                            {Number(intent.score).toFixed(0)}/100
+                          </span>
+                        ) : <span style={{ color: "var(--muted)" }}>—</span>}
+                      </td>
+                      <td style={{
+                        fontFamily: "var(--font-mono)", fontSize: "var(--fs-xs)", color: "var(--muted)",
+                        maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      }}>
                         {intent.orderId || "—"}
                       </td>
-                      <td className="px-4 py-2.5 text-xs text-gray-400 font-mono truncate max-w-[100px]">
-                        {intent.runId || "—"}
+                      <td onClick={(e) => { e.stopPropagation(); setExpandedId(isExpanded ? null : id); }}>
+                        <button
+                          className="btn"
+                          style={{
+                            padding: "3px 10px", fontSize: "var(--fs-xs)",
+                            color: isExpanded ? "var(--accent)" : "var(--muted)",
+                            borderColor: isExpanded ? "rgba(79,142,247,.4)" : undefined,
+                            background: isExpanded ? "var(--accent-dim)" : undefined,
+                          }}
+                        >
+                          {isExpanded ? "▲ IA" : "▼ IA"}
+                        </button>
                       </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          <p className="px-6 py-3 text-xs text-gray-400 border-t">
-            Mostrando {visible.length} de {kpiTotal} intents · atualiza a cada 30s
-          </p>
-        </section>
-
-        {/* ── SELL intent highlight ──────────────────────────────────── */}
-        {intents.some((i) => i.side === "SELL" && i.status === "REJECTED") && (
-          <div className="rounded-lg border border-red-300 bg-red-50 px-5 py-4 text-sm text-red-700">
-            <span className="font-bold">Atenção:</span> há intents de SELL com status REJECTED. Verifique positions abertas manualmente.
+                    </tr>,
+                    isExpanded && (
+                      <IntentExplainRow
+                        key={`explain-${id}`}
+                        intent={intent}
+                        onClose={() => setExpandedId(null)}
+                      />
+                    ),
+                  ];
+                })}
+              </tbody>
+            </table>
           </div>
         )}
+
+        <p style={{ marginTop: 10, fontSize: "var(--fs-xs)", color: "var(--muted)" }}>
+          Mostrando {visible.length} de {intents.length} intents · atualiza a cada 30s · clique numa linha ou em ▼ IA para ver a explicação Gemini
+        </p>
       </div>
-    </main>
+    </AppShell>
   );
 }
