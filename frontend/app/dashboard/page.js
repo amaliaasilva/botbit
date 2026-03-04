@@ -142,14 +142,18 @@ function MercadoTab({ uid = "", mode = "PAPER" }) {
   const [scoreUniverse, setScoreUniverse] = useState(null);
 
   useEffect(() => {
+    if (!uid) return;
     setLoading(true);
     return subscribeMarketRanking(50, (rows) => {
       setRanking(rows);
       setLoading(false);
     });
-  }, []);
+  }, [uid]);
 
-  useEffect(() => { return subscribeScoreUniverse((d) => setScoreUniverse(d)); }, []);
+  useEffect(() => {
+    if (!uid) return;
+    return subscribeScoreUniverse((d) => setScoreUniverse(d));
+  }, [uid]);
 
   /* Fetch discover for the clicked symbol (may not be in bulk discoverMap) */
   useEffect(() => {
@@ -847,7 +851,10 @@ export default function DashboardPage() {
   const [mode, setMode] = useState("PAPER");
   const router = useRouter();
 
-  useEffect(() => { return subscribeTradingState((s) => setMode(String(s?.mode || "PAPER").toUpperCase())); }, []);
+  useEffect(() => {
+    if (!uid) return;
+    return subscribeTradingState((s) => setMode(String(s?.mode || "PAPER").toUpperCase()));
+  }, [uid]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;

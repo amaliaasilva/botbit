@@ -285,6 +285,32 @@ export function subscribePendingIntents(onData, limitSize = 20) {
   });
 }
 
+export function subscribeRestingIntents(onData, limitSize = 5) {
+  if (!db) return () => {};
+  const ref = collection(db, "trade_intents");
+  // Use two separate subscriptions merged client-side (Firestore doesn't allow multi-value "in" 
+  // combined with orderBy without a composite index in all configs).
+  let pending = [];
+  let submitted = [];
+  const merge = () => {
+    const merged = [...pending, ...submitted].sort(
+      (a, b) => ((b.createdAt?.seconds ?? 0) - (a.createdAt?.seconds ?? 0))
+    );
+    onData(merged.slice(0, limitSize));
+  };
+  const q1 = query(ref, where("status", "==", "RESTING_PENDING"), limit(limitSize));
+  const q2 = query(ref, where("status", "==", "RESTING_SUBMITTED"), limit(limitSize));
+  const unsub1 = onSnapshot(q1, (snap) => {
+    pending = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    merge();
+  });
+  const unsub2 = onSnapshot(q2, (snap) => {
+    submitted = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    merge();
+  });
+  return () => { unsub1(); unsub2(); };
+}
+
 export function subscribeScoreUniverse(onData) {
   if (!db) return () => {};
   const ref = doc(db, "config", "score_universe_current");

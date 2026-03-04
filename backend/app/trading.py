@@ -496,6 +496,271 @@ def _live_gate_ok(config: dict[str, Any]) -> tuple[bool, str]:
     return True, "OK"
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Resting-order always-on logic
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _ensure_resting_order(
+    *,
+    fs,
+    bq,
+    config: dict,
+    mode: str,
+    api_key: str,
+    api_secret: str,
+    quote_map: dict,
+    market_map: dict,
+    discover_rows: list,
+    market_rows: list,
+    run_id: str,
+    resting_candidates: list,
+    universe_meta: dict,
+    exchange_info: dict,
+    exit_cfg: dict,
+    alerts,
+    owner_uid: str,
+    errors: list,
+    state: dict,
+) -> dict:
+    """Mantém sempre 1 LIMIT BUY GTC aberta quando não há posição aberta (resting order)."""
+    resting_cfg = config.get("resting") or {}
+    if not resting_cfg.get("enabled", False):
+        return {"action": "disabled"}
+
+    # Skip if any open position
+    open_positions = fs.list_trading_positions(status="OPEN", limit_size=200)
+    if open_positions:
+        return {"action": "skipped_has_positions", "count": len(open_positions)}
+
+    discount_pct = _safe_float(resting_cfg.get("discountPct"), 0.008)
+    atr_mult = _safe_float(resting_cfg.get("atrMult"), 0.8)
+    refresh_minutes = _safe_float(resting_cfg.get("refreshMinutes"), 60)
+    max_age_minutes = _safe_float(resting_cfg.get("maxOrderAgeMinutes"), 360)
+    anchor_symbols = resting_cfg.get("anchorSymbolsIfNone") or ["BTCUSDT", "ETHUSDT"]
+    now = _now()
+
+    # Check existing resting intents (RESTING_PENDING or RESTING_SUBMITTED)
+    existing_resting = []
+    for st in ("RESTING_PENDING", "RESTING_SUBMITTED"):
+        existing_resting.extend(fs.list_trade_intents(status=st, limit_size=10))
+
+    # Cancel stale or safety-violated resting intents
+    cancelled_any = False
+    for intent in existing_resting:
+        intent_id = intent.get("intentId", "")
+        sym = intent.get("symbol", "")
+        created_at = intent.get("createdAt")
+        try:
+            created_dt = created_at.replace(tzinfo=None) if (created_at and getattr(created_at, "tzinfo", None)) else (created_at or now)
+        except Exception:
+            created_dt = now
+        age_minutes = (now - created_dt).total_seconds() / 60.0
+
+        mkt = market_map.get(sym) or {}
+        regime = str(mkt.get("regime") or "")
+        signal = str(mkt.get("signal") or "WAIT").upper()
+
+        cancel_reason = None
+        if regime == "Baixa" or signal == "AVOID":
+            cancel_reason = f"regime_or_signal:{regime}/{signal}"
+        elif age_minutes > max_age_minutes:
+            cancel_reason = f"max_age:{age_minutes:.0f}min"
+
+        if cancel_reason:
+            order_id_val = _safe_int(intent.get("orderId"), 0)
+            if mode in ("LIVE", "TESTNET") and order_id_val:
+                try:
+                    client = BinanceTradeClient(api_key=api_key, api_secret=api_secret, mode=mode)
+                    client.cancel_order(symbol=sym, order_id=order_id_val)
+                except Exception as exc:
+                    errors.append({"symbol": sym, "error": f"RESTING_CANCEL_FAIL: {exc}"})
+            fs.update_trade_intent(intent_id, {"status": "CANCELLED", "cancelReason": cancel_reason})
+            cancelled_any = True
+
+    if existing_resting and not cancelled_any:
+        # Valid resting intent exists — check refresh window
+        newest = max(existing_resting, key=lambda i: (i.get("createdAt") or now))
+        created_at = newest.get("createdAt")
+        try:
+            created_dt = created_at.replace(tzinfo=None) if (created_at and getattr(created_at, "tzinfo", None)) else (created_at or now)
+        except Exception:
+            created_dt = now
+        age_minutes = (now - created_dt).total_seconds() / 60.0
+        if age_minutes < refresh_minutes:
+            return {"action": "resting_active", "intentId": newest.get("intentId"), "ageMinutes": round(age_minutes, 1)}
+
+    # ── Select candidate: STRICT → FALLBACK → ANCHOR ──
+    selected_candidate = None
+    decision_profile = "STRICT"
+
+    if resting_candidates:
+        selected_candidate = resting_candidates[0]
+        decision_profile = "STRICT"
+    else:
+        # FALLBACK
+        fallback_cfg = (config.get("entry") or {}).get("fallback") or {}
+        allowed_regimes = fallback_cfg.get("allowedRegimes") or ["Alta", "Neutro"]
+        allowed_signals = fallback_cfg.get("allowedSignals") or ["BUY", "WAIT"]
+        min_score = _safe_float(fallback_cfg.get("minScore"), 55)
+        min_potential = _safe_float(fallback_cfg.get("minPotentialScore"), 60)
+        min_volume = _safe_float(fallback_cfg.get("minQuoteVolume24hUSDT"), 1_000_000)
+
+        sorted_rows = sorted(
+            (r for r in (discover_rows or []) if r.get("symbol")),
+            key=lambda r: (_safe_float(r.get("potentialScore"), 0), _safe_float(r.get("score"), 0)),
+            reverse=True,
+        )
+        for row in sorted_rows:
+            sym = str(row.get("symbol", ""))
+            mkt = market_map.get(sym) or {}
+            regime = str(mkt.get("regime") or row.get("regime") or "")
+            signal = str(mkt.get("signal") or row.get("signal") or "WAIT").upper()
+            score = _safe_float(mkt.get("score") or row.get("score"), 0)
+            potential = _safe_float(row.get("potentialScore"), 0)
+            volume = _safe_float(mkt.get("quoteVolume") or row.get("quoteVolume24h"), 0)
+            if (regime in allowed_regimes and signal in allowed_signals
+                    and score >= min_score and potential >= min_potential and volume >= min_volume):
+                price_fb = _safe_float((quote_map.get(sym) or {}).get("price"), 0) or _safe_float(mkt.get("price"), 0)
+                atr_fb = max(_safe_float(mkt.get("atr14") or row.get("atr"), 0), price_fb * 0.003)
+                selected_candidate = {
+                    "symbol": sym, "price": price_fb, "atr": atr_fb,
+                    "score": score, "potentialScore": potential,
+                    "regime": regime, "signal": signal,
+                }
+                decision_profile = "FALLBACK"
+                break
+
+    if selected_candidate is None:
+        # ANCHOR
+        for sym in anchor_symbols:
+            mkt = market_map.get(sym) or {}
+            price_anchor = _safe_float((quote_map.get(sym) or {}).get("price"), 0) or _safe_float(mkt.get("price"), 0)
+            atr_anchor = max(_safe_float(mkt.get("atr14"), 0), price_anchor * 0.003)
+            regime = str(mkt.get("regime") or "")
+            signal = str(mkt.get("signal") or "WAIT").upper()
+            if price_anchor > 0 and regime != "Baixa" and signal != "AVOID":
+                selected_candidate = {
+                    "symbol": sym, "price": price_anchor, "atr": atr_anchor,
+                    "score": _safe_float(mkt.get("score"), 0),
+                    "regime": regime, "signal": signal,
+                }
+                decision_profile = "ANCHOR"
+                break
+
+    if selected_candidate is None:
+        return {"action": "no_candidate"}
+
+    sym = selected_candidate["symbol"]
+    price = _safe_float(selected_candidate.get("price"), 0)
+    if price <= 0:
+        return {"action": "no_price", "symbol": sym}
+
+    atr_val = max(_safe_float(selected_candidate.get("atr"), 0), price * 0.003)
+    discount = max(atr_val * atr_mult, price * discount_pct)
+    limit_price = max(price - discount, price * 0.001)
+
+    # Notional: fallbackSizeMultiplier × normal allocation
+    size_mult = _safe_float(resting_cfg.get("fallbackSizeMultiplier"), 0.25)
+    equity = _safe_float(state.get("equityUSDT"), _safe_float(config.get("paperInitialCashUSDT"), 1000))
+    cash = _safe_float(state.get("cashUSDT"), equity)
+    max_notional_pct = _safe_float(config.get("maxNotionalPerTradePct"), 35) / 100.0
+    notional = min(equity * max_notional_pct, cash * 0.98) * size_mult
+
+    try:
+        step, min_notional_exchange = _symbol_filters(exchange_info, sym)
+    except Exception:
+        step, min_notional_exchange = 0.001, 5.0
+    min_notional = max(_safe_float(config.get("minNotionalUSDT"), 10), min_notional_exchange)
+    if notional < min_notional:
+        notional = min_notional
+
+    qty = _round_step(notional / max(limit_price, 1e-9), step)
+    if qty <= 0:
+        return {"action": "qty_zero", "symbol": sym}
+
+    stop_i = max(0.0, limit_price - _safe_float(exit_cfg.get("stopAtrMult"), 1.5) * atr_val)
+    take_i = max(limit_price, limit_price + _safe_float(exit_cfg.get("takeAtrMult"), 2.5) * atr_val)
+
+    resting_intent_id = _dedupe_order_id(run_id, sym, "RESTING_BUY", mode)
+    intent_payload = {
+        "intentId": resting_intent_id,
+        "status": "RESTING_PENDING",
+        "createdAt": now,
+        "runId": run_id,
+        "symbol": sym,
+        "side": "BUY",
+        "orderType": "LIMIT",
+        "intentType": "RESTING_LIMIT",
+        "decisionProfile": decision_profile,
+        "quantity": qty,
+        "price": round(limit_price, 8),
+        "stopPrice": round(stop_i, 8),
+        "takePrice": round(take_i, 8),
+        "mode": mode,
+        "score": selected_candidate.get("score"),
+        "regime": selected_candidate.get("regime"),
+        "signal": selected_candidate.get("signal"),
+        "sourceUniverse": universe_meta.get("mode", "UNKNOWN"),
+        "sourceUniverseSize": universe_meta.get("size", 0),
+    }
+
+    fs.client.collection("trade_intents").document(resting_intent_id).set(intent_payload)
+
+    if mode == "PAPER":
+        return {
+            "action": "resting_placed_paper",
+            "symbol": sym,
+            "limitPrice": round(limit_price, 8),
+            "decisionProfile": decision_profile,
+        }
+
+    # LIVE / TESTNET: real order
+    try:
+        client = BinanceTradeClient(api_key=api_key, api_secret=api_secret, mode=mode)
+        order = client.place_order(
+            symbol=sym,
+            side="BUY",
+            order_type="LIMIT",
+            quantity=qty,
+            price=round(limit_price, 8),
+            timeInForce="GTC",
+            newClientOrderId=resting_intent_id,
+        )
+        order_id = str(order.get("orderId") or resting_intent_id)
+        status = str(order.get("status") or "NEW")
+        fs.update_trade_intent(resting_intent_id, {"status": "RESTING_SUBMITTED", "orderId": order_id, "orderStatus": status})
+        _notify(
+            fs,
+            alerts,
+            owner_uid,
+            event_type="RESTING_ORDER_PLACED",
+            priority="P2",
+            title=f"Resting Order — {sym}",
+            message=f"LIMIT BUY GTC em {sym} @ {round(limit_price, 8)} [{decision_profile}]",
+            symbol=sym,
+            direction="BUY",
+            payload={
+                "intentId": resting_intent_id,
+                "orderId": order_id,
+                "limitPrice": round(limit_price, 8),
+                "qty": qty,
+                "decisionProfile": decision_profile,
+                "action_items": "Monitorar filling da resting order no painel Trading",
+            },
+        )
+        return {
+            "action": "resting_placed",
+            "symbol": sym,
+            "limitPrice": round(limit_price, 8),
+            "decisionProfile": decision_profile,
+            "orderId": order_id,
+        }
+    except Exception as exc:
+        fs.update_trade_intent(resting_intent_id, {"status": "RESTING_REJECTED", "error": str(exc)})
+        errors.append({"symbol": sym, "error": f"RESTING_FAIL: {exc}"})
+        return {"action": "resting_error", "symbol": sym, "error": str(exc)}
+
+
 def execute_manual_order(
     fs: "FirestoreNotificationStorage",
     bq: "BigQueryStorage",
@@ -880,6 +1145,7 @@ def run_trade_pipeline() -> dict[str, Any]:
                 }
 
         candidates, universe_meta = _entry_filter(config, discover_rows, market_rows, quotes_rows, fs=fs, owner_uid=owner_uid)
+        resting_candidates = candidates[:]  # save full STRICT list before capacity pruning
         open_positions = fs.list_trading_positions(status="OPEN", limit_size=200)
         quote_map = {str(row.get("symbol") or "").upper(): row for row in quotes_rows}
         market_map = {str(row.get("symbol") or "").upper(): row for row in market_rows}
@@ -1275,6 +1541,32 @@ def run_trade_pipeline() -> dict[str, Any]:
                         "errors": errors[:5],
                         "error": "BINANCE_451",
                     }
+
+        # ── Resting order (always-on) ──────────────────────────────────────────
+        try:
+            _ensure_resting_order(
+                fs=fs,
+                bq=bq,
+                config=config,
+                mode=mode,
+                api_key=api_key,
+                api_secret=api_secret,
+                quote_map=quote_map,
+                market_map=market_map,
+                discover_rows=discover_rows,
+                market_rows=market_rows,
+                run_id=run_id,
+                resting_candidates=resting_candidates,
+                universe_meta=universe_meta,
+                exchange_info=exchange_info,
+                exit_cfg=exit_cfg,
+                alerts=alerts,
+                owner_uid=owner_uid,
+                errors=errors,
+                state=state,
+            )
+        except Exception as _resting_exc:
+            errors.append({"symbol": "_resting", "error": str(_resting_exc)})
 
         open_positions = fs.list_trading_positions(status="OPEN", limit_size=300)
         position_rows = []

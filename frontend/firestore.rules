@@ -38,6 +38,11 @@ service cloud.firestore {
       allow read, write: if isAllowedAdmin();
     }
 
+    match /executor_heartbeat/{docId} {
+      allow read: if isAllowedAdmin();
+      allow write: if false;
+    }
+
     match /discover_latest/{symbol} {
       allow read, write: if isAllowedAdmin();
     }

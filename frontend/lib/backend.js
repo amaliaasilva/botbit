@@ -108,12 +108,12 @@ export async function triggerEmergencyStop() {
 
 export async function fetchLiveQuotes(symbols) {
   if (!symbols || !symbols.length) return [];
-  const data = await getJson(`/api/live-quotes?symbols=${symbols.join(",")}`);
+  const data = await getJson(`/api/live-quotes?symbols=${symbols.join(",")}`, true);
   return data?.items || [];
 }
 
 export async function fetchExplain(symbol) {
-  return getJson(`/api/explain/${encodeURIComponent(symbol)}`);
+  return getJson(`/api/explain/${encodeURIComponent(symbol)}`, true);
 }
 
 export async function fetchBinanceValidate() {

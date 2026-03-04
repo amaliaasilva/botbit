@@ -6,7 +6,7 @@ import { auth } from "../../lib/firebase";
 import { getUserSettings, updateUserSettings } from "../../lib/firestore";
 import { useRouter } from "next/navigation";
 import AppShell from "../../components/AppShell";
-import { emergencyStopTrading, subscribeTradingConfig, subscribeTradingState, updateTradingConfig, subscribeExecutorStatus, subscribePendingIntents } from "../../lib/firestore";
+import { emergencyStopTrading, subscribeTradingConfig, subscribeTradingState, updateTradingConfig, subscribeExecutorStatus, subscribePendingIntents, subscribeRestingIntents } from "../../lib/firestore";
 import { fetchBinanceValidate, fetchLiveGateStatus, triggerAlertTest, triggerRunDiscover, triggerRunScore } from "../../lib/backend";
 
 const TABS = [
@@ -52,6 +52,7 @@ export default function SettingsPage() {
   const [tradingMessage, setTradingMessage] = useState("");
   const [executorStatus, setExecutorStatus] = useState(null);
   const [pendingIntents, setPendingIntents] = useState([]);
+  const [restingIntents, setRestingIntents] = useState([]);
   const [binanceValidation, setBinanceValidation] = useState(null);
   const [binanceValidating, setBinanceValidating] = useState(false);
   const [gateStatus, setGateStatus] = useState(null);
@@ -101,6 +102,7 @@ export default function SettingsPage() {
   useEffect(() => subscribeTradingState((row) => setTradingState(row)), []);
   useEffect(() => subscribeExecutorStatus((s) => setExecutorStatus(s)), []);
   useEffect(() => subscribePendingIntents((items) => setPendingIntents(items)), []);
+  useEffect(() => subscribeRestingIntents((items) => setRestingIntents(items)), []);
 
   async function save() {
     if (!uid) return;
@@ -720,6 +722,138 @@ python tools/testnet_executor.py`}</pre>
               </label>
             </div>
             <p className="settings-help">Esses limites evitam excesso de exposição e ajudam a manter previsibilidade operacional.</p>
+          </div>
+
+          {/* ── Resting Order (Always On) ── */}
+          <div className="card" style={{
+            marginTop: 12,
+            borderLeft: `4px solid ${tradingConfig?.resting?.enabled ? "var(--good)" : "rgba(156,163,175,.4)"}`,
+          }}>
+            <div className="card-title">
+              <strong>Resting Order (Always On)</strong>
+              <span className={`chip badge ${tradingConfig?.resting?.enabled ? "buy" : "wait"}`}>
+                {tradingConfig?.resting?.enabled ? "● ATIVA" : "○ DESATIVADA"}
+              </span>
+            </div>
+            <p className="settings-help" style={{ marginBottom: 10 }}>
+              Quando ativado, o bot mantém sempre 1 ordem LIMIT BUY GTC aberta enquanto não há posição aberta.
+              O candidato é selecionado por prioridade: STRICT → FALLBACK → ANCHOR.
+              A ordem é cancelada/recriada se o regime virar Baixa, sinal virar AVOID, ou após o tempo de refresh.
+            </p>
+
+            {/* Enable/disable toggle */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+              <button
+                className="btn"
+                onClick={() => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), enabled: true } })}
+                style={tradingConfig?.resting?.enabled ? { borderColor: "var(--good)", color: "var(--good)" } : {}}
+              >
+                Ativar
+              </button>
+              <button
+                className="btn"
+                onClick={() => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), enabled: false } })}
+                style={!tradingConfig?.resting?.enabled ? { borderColor: "rgba(239,68,68,.4)", color: "#FCA5A5" } : {}}
+              >
+                Desativar
+              </button>
+            </div>
+
+            {/* Config params */}
+            <div className="grid cols-3" style={{ marginBottom: 12 }}>
+              <label>
+                Desconto % (discountPct)
+                <input
+                  type="number" step="0.001"
+                  value={Number(tradingConfig?.resting?.discountPct ?? 0.008)}
+                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), discountPct: Number(e.target.value) } })}
+                />
+              </label>
+              <label>
+                Multiplicador ATR (atrMult)
+                <input
+                  type="number" step="0.1"
+                  value={Number(tradingConfig?.resting?.atrMult ?? 0.8)}
+                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), atrMult: Number(e.target.value) } })}
+                />
+              </label>
+              <label>
+                Refresh (minutos)
+                <input
+                  type="number"
+                  value={Number(tradingConfig?.resting?.refreshMinutes ?? 60)}
+                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), refreshMinutes: Number(e.target.value) } })}
+                />
+              </label>
+              <label>
+                Idade máxima (minutos)
+                <input
+                  type="number"
+                  value={Number(tradingConfig?.resting?.maxOrderAgeMinutes ?? 360)}
+                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), maxOrderAgeMinutes: Number(e.target.value) } })}
+                />
+              </label>
+              <label>
+                Tamanho relativo (fallbackSizeMultiplier)
+                <input
+                  type="number" step="0.05"
+                  value={Number(tradingConfig?.resting?.fallbackSizeMultiplier ?? 0.25)}
+                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), fallbackSizeMultiplier: Number(e.target.value) } })}
+                />
+              </label>
+              <label>
+                Âncoras (símbolos p/ fallback)
+                <input
+                  type="text"
+                  value={(tradingConfig?.resting?.anchorSymbolsIfNone || ["BTCUSDT", "ETHUSDT"]).join(",")}
+                  onChange={(e) => saveTradingPatch({ resting: { ...(tradingConfig?.resting || {}), anchorSymbolsIfNone: e.target.value.split(",").map(s => s.trim().toUpperCase()).filter(Boolean) } })}
+                />
+              </label>
+            </div>
+
+            {/* Current resting intents */}
+            <div className="card-title" style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid rgba(255,255,255,.08)" }}>
+              <strong style={{ fontSize: "var(--fs-sm)" }}>Resting orders ativas</strong>
+              <span className="chip">{restingIntents.length}</span>
+            </div>
+            {restingIntents.length === 0 ? (
+              <p style={{ color: "var(--muted)", fontSize: "var(--fs-sm)", marginTop: 4 }}>Nenhuma resting order pendente no momento.</p>
+            ) : (
+              <div className="table-wrap" style={{ marginTop: 6 }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Símbolo</th>
+                      <th>Perfil</th>
+                      <th>Preço limite</th>
+                      <th>Qtd</th>
+                      <th>Status</th>
+                      <th>Criada em</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {restingIntents.map((ri) => {
+                      const createdTs = ri.createdAt?.toDate ? ri.createdAt.toDate() : (ri.createdAt ? new Date(ri.createdAt) : null);
+                      const ageMin = createdTs ? Math.round((Date.now() - createdTs.getTime()) / 60000) : null;
+                      return (
+                        <tr key={ri.id}>
+                          <td className="asset">{ri.symbol || "—"}</td>
+                          <td>
+                            <span className={`chip badge ${ri.decisionProfile === "STRICT" ? "buy" : ri.decisionProfile === "FALLBACK" ? "wait" : "avoid"}`}>
+                              {ri.decisionProfile || "—"}
+                            </span>
+                          </td>
+                          <td className="mono">{ri.price != null ? ri.price.toFixed(6) : "—"}</td>
+                          <td className="mono">{ri.quantity ?? "—"}</td>
+                          <td><span className="chip badge wait">{ri.status}</span></td>
+                          <td className="mono">{ageMin != null ? `${ageMin}m atrás` : "—"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
 
           {tradingMessage ? <div className="chip" style={{ marginTop: 12 }}>{tradingMessage}</div> : null}

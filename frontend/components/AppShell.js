@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { onAuthStateChanged } from "firebase/auth";
+import { auth } from "../lib/firebase";
 import { subscribeTradingConfig, subscribeTradingState, subscribeExecutorStatus } from "../lib/firestore";
 import ModeBanner from "./ui/ModeBanner";
 
@@ -47,29 +49,40 @@ export default function AppShell({ title, subtitle, children, rightActions }) {
   const [tradingMode, setTradingMode] = useState("PAPER");
   const [tradingEnabled, setTradingEnabled] = useState(false);
   const [executorStatus, setExecutorStatus] = useState(null);
+  const [authed, setAuthed] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     setCurrentQuery(window.location.search || "");
   }, [pathname]);
 
+  // Aguarda auth resolver antes de iniciar qualquer subscription Firestore
   useEffect(() => {
-    return subscribeTradingState((state) => {
-      if (state?.mode) setTradingMode(String(state.mode).toUpperCase());
-    });
+    if (!auth) return;
+    const unsub = onAuthStateChanged(auth, (user) => setAuthed(!!user));
+    return () => unsub();
   }, []);
 
   useEffect(() => {
+    if (!authed) return;
+    return subscribeTradingState((state) => {
+      if (state?.mode) setTradingMode(String(state.mode).toUpperCase());
+    });
+  }, [authed]);
+
+  useEffect(() => {
+    if (!authed) return;
     return subscribeTradingConfig((cfg) => {
       if (!cfg) return;
       if (cfg.mode) setTradingMode(String(cfg.mode).toUpperCase());
       setTradingEnabled(Boolean(cfg.enabled));
     });
-  }, []);
+  }, [authed]);
 
   useEffect(() => {
+    if (!authed) return;
     return subscribeExecutorStatus((s) => setExecutorStatus(s));
-  }, []);
+  }, [authed]);
 
   const currentParams = new URLSearchParams(currentQuery);
   const currentTab = currentParams.get("tab") || "";
